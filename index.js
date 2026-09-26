@@ -98,6 +98,7 @@ class MiniWS {
     this.onmessage = null
     this.onclose = null
     this.onerror = null
+    this.onpong = null
   }
 
   connect() {
@@ -240,7 +241,7 @@ class MiniWS {
       }
       if (opcode === 0x8) { this.close(); return }
       if (opcode === 0x9) { try { this.sock.write(this._frame(0xa, payload)) } catch (e) { /* ignore */ } ; continue }
-      if (opcode === 0xa) { continue }
+      if (opcode === 0xa) { if (this.onpong) { try { this.onpong() } catch (e) { /* ignore */ } } ; continue }
       if (opcode === 0x0) {
         this.fragChunks.push(payload)
         if (fin) {
@@ -277,8 +278,10 @@ class XiaoYiChannel {
     this.stopped = true
     this.lastError = ''
     this.lastMessageAt = 0
+    this.lastActivityAt = 0
     this.msgCount = 0
     this.onRequest = opts.onRequest || (() => {})
+    this.onCancel = opts.onCancel || (() => {})
   }
 
   ready() {
@@ -340,23 +343,41 @@ class XiaoYiChannel {
     }
     this.ws = ws
     ws.onopen = () => {
+      if (this.ws !== ws) return           // 旧连接的迟到事件，丢弃
       this.connected = true
       this.reconnectAttempts = 0
       this.lastError = ''
+      this.lastActivityAt = Date.now()
       log('已连上小艺服务器 ' + this.wsUrl)
       this._send({ msgType: 'clawd_bot_init', agentId: this.agentId })
       this.heartbeatTimer = setInterval(() => {
-        if (!this.connected) return
-        try { this.ws.ping() } catch (e) { /* ignore */ }
+        if (this.ws !== ws || !this.connected) return
+        // 心跳 + 活性判断：连着但长时间收不到任何回音（含 pong）→ 判定假死，主动重连。
+        // 交换机能骗过 TCP，骗不过"多久没听见对面说话"。
+        const idle = Date.now() - (this.lastActivityAt || 0)
+        if (idle > HEARTBEAT_MS * 3) {
+          this.lastError = '连接假死 ' + Math.round(idle / 1000) + 's 没回音，主动重连'
+          log(this.lastError)
+          try { ws.close() } catch (e) { /* ignore */ }
+          return
+        }
+        try { ws.ping() } catch (e) { /* ignore */ }
         this._send({ msgType: 'heartbeat', agentId: this.agentId, timestamp: Date.now() })
       }, HEARTBEAT_MS)
     }
-    ws.onmessage = (text) => this._onMessage(text)
+    ws.onmessage = (text) => {
+      if (this.ws !== ws) return           // 旧连接的消息，丢弃
+      this.lastActivityAt = Date.now()
+      this._onMessage(text)
+    }
+    ws.onpong = () => { if (this.ws === ws) this.lastActivityAt = Date.now() }
     ws.onerror = (err) => {
+      if (this.ws !== ws) return
       this.lastError = String((err && err.message) || err)
       log('连接出错: ' + this.lastError)
     }
     ws.onclose = () => {
+      if (this.ws !== ws) return           // 已经不是当前连接了，别动状态、别触发重连
       if (this.connected) log('与小艺的连接断开')
       this.connected = false
       this.ws = null
@@ -404,6 +425,7 @@ class XiaoYiChannel {
       const taskId = msg.taskId || msg.id
       this._sendJsonRpc(msg.id, { result: { id: taskId, status: { state: 'canceled' } } }, sid, taskId)
       log('收到 tasks/cancel，已回执', taskId)
+      try { this.onCancel({ sessionId: sid, taskId, id: msg.id }) } catch (e) { /* ignore */ }
       return
     }
     // A2A 对话请求
@@ -524,7 +546,16 @@ async function downloadInboundFiles(fileParts) {
         res = await fetch(uri, { signal: ctl.signal, headers: { 'User-Agent': 'dsh-xiaoyi/0.1' } })
       } finally { clearTimeout(timer) }
       if (!res.ok) throw new Error('HTTP ' + res.status)
+      // 体积闸门：别让一个大附件把磁盘塞满（默认 50 MB 上限）
+      const MAX_INBOUND = 50 * 1024 * 1024
+      const declared = Number(res.headers.get('content-length') || 0)
+      if (declared && declared > MAX_INBOUND) {
+        throw new Error('文件太大：' + (declared / 1048576).toFixed(1) + ' MB（上限 50 MB）')
+      }
       const buf = Buffer.from(await res.arrayBuffer())
+      if (buf.length > MAX_INBOUND) {
+        throw new Error('文件太大：' + (buf.length / 1048576).toFixed(1) + ' MB（上限 50 MB）')
+      }
       writeFileSync(dest, buf)
       out.push({ ok: true, path: dest, name: rawName || name, mimeType: mime || res.headers.get('content-type') || '', bytes: buf.length })
       log('已下载小艺附件 → ' + dest + '（' + buf.length + ' 字节）')
@@ -631,9 +662,8 @@ export function apply(ctx) {
 
   let listenHandle = null
   let listenStarting = false
-  let pending = []            // 待回复的小艺请求队列（FIFO）
+  let pending = []            // 待回复的小艺请求队列（FIFO）：回复永远对着队首
   let currentReply = ''       // 本回合最近一段正文
-  let active = null           // 正在处理的那条请求
 
   const channel = new XiaoYiChannel({
     ak: state.ak,
@@ -669,8 +699,9 @@ export function apply(ctx) {
               text += '\n\n以下附件没抓下来：\n' + badList.map((f) => '- ' + f.name + '（' + f.error + '）').join('\n')
             }
           }
-          currentReply = ''
-          active = req
+          // 注意：这里**不**动 currentReply / 不认领 active——
+          // 多条消息可能排队进来，回复一律认队首（finishTurn 里 shift），
+          // 否则第二条会把第一条的正文顶掉、还把回帧挂到错的 taskId 上。
           h.agent.followup({
             id: 'xy-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
             role: 'user',
@@ -681,9 +712,15 @@ export function apply(ctx) {
           log('处理小艺请求失败', e && e.message)
           channel.sendArtifact(req.sessionId, req.taskId, req.messageId, '处理这条消息时出错了：' + String((e && e.message) || e), true)
           pending = pending.filter((p) => p !== req)
-          if (active === req) active = null
         }
       })()
+    },
+    onCancel: (info) => {
+      // 端侧按了"停止"：把这条任务从待回复队列里摘掉，免得之后把回复发到已取消的任务上
+      const before = pending.length
+      pending = pending.filter((p) => !(p.taskId === info.taskId || p.messageId === info.taskId || p.taskId === info.id))
+      if (pending.length !== before) log('已从待回复队列移除被取消的任务（剩 ' + pending.length + ' 条）')
+      currentReply = ''
     },
   })
 
@@ -694,7 +731,9 @@ export function apply(ctx) {
       const root = join(homedir(), '.dsh', 'sessions')
       // 只认工作目录正确的那一档（DSH 用 `--C-Users-Alice-Desktop--` 这种目录名编码 cwd）
       const wantCwd = String(state.cwd || join(homedir(), 'Desktop'))
-      const wantTag = '--' + wantCwd.replace(/[:\\/]/g, '-') + '--'
+      // DSH 的工作区目录名编码规则：去掉盘符冒号，`\` 与 `/` 换成 `-`。
+      // 例：C:\Users\Alice\Desktop → --C-Users-Alice-Desktop--
+      const wantTag = '--' + wantCwd.replace(/:/g, '').replace(/[\\/]/g, '-') + '--'
       let best = ''
       let bestTime = 0
       for (const ws of readdirSync(root)) {
@@ -799,18 +838,18 @@ export function apply(ctx) {
   // ── 回复回传小艺 ──────────────────────────────────────────────────────────
 
   function finishTurn(reason) {
-    const req = active
+    // 回复永远对着队首：DSH 会话里的回合是一条条排队的，谁先问谁先答。
+    const req = pending[0]
     const text = currentReply
     if (!req) { currentReply = ''; return }
-    active = null
     currentReply = ''
-    pending = pending.filter((p) => p !== req)
+    pending.shift()
     const out = String(text || '').trim()
-    if (!out) return
+    if (!out) { log('本回合没有可见正文（' + reason + '），不回帧'); return }
     // 照参照实现：先发一条"已完成"状态帧，再发正文的 artifact-update（final=true 收尾）
     channel.sendStatus(req.sessionId, req.taskId, req.messageId, '任务处理已完成~', 'completed', false)
     channel.sendArtifact(req.sessionId, req.taskId, req.messageId, out, true)
-    log('已回小艺（' + reason + '）长度=' + out.length)
+    log('已回小艺（' + reason + '）长度=' + out.length + '，队列剩 ' + pending.length)
   }
 
   ctx.on('session/event', (session, event) => {
@@ -829,7 +868,7 @@ export function apply(ctx) {
     try {
       if (!payload || payload.status !== 'idle') return
       if (!listenHandle || payload.agent !== listenHandle.agent) return
-      if (active) finishTurn('idle')
+      if (pending.length && currentReply) finishTurn('idle')
     } catch (e) { /* ignore */ }
   })
 
@@ -895,7 +934,7 @@ export function apply(ctx) {
     async execute(args) {
       const text = String((args && args.text) || '').trim()
       if (!text) return { ok: false, error: 'text 为空' }
-      const req = active || pending[0]
+      const req = pending[0]
       if (!req) return { ok: false, error: '当前没有进行中的小艺会话' }
       const sent = channel.sendStatus(req.sessionId, req.taskId, req.messageId, text, 'working', false)
       return { ok: Boolean(sent), sessionId: req.sessionId, taskId: req.taskId }
@@ -941,7 +980,7 @@ export function apply(ctx) {
       const a = args && typeof args === 'object' ? args : {}
       const filePath = String(a.filePath || '')
       if (!filePath || !existsSync(filePath)) return { ok: false, error: '文件不存在：' + filePath }
-      const req = active || pending[0]
+      const req = pending[0]
       if (!req) return { ok: false, error: '当前没有进行中的小艺会话（得先在小艺里说句话）' }
       const mode = String(a.mode || (state.publicBaseUrl ? 'local' : (state.imageHost || 'catbox')))
       let file = null
