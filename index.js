@@ -653,6 +653,8 @@ export function apply(ctx) {
     pending = pending.filter((p) => p !== req)
     const out = String(text || '').trim()
     if (!out) return
+    // 照参照实现：先发一条"已完成"状态帧，再发正文的 artifact-update（final=true 收尾）
+    channel.sendStatus(req.sessionId, req.taskId, req.messageId, '任务处理已完成~', 'completed', false)
     channel.sendArtifact(req.sessionId, req.taskId, req.messageId, out, true)
     log('已回小艺（' + reason + '）长度=' + out.length)
   }
