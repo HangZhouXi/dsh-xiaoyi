@@ -465,6 +465,61 @@ class XiaoYiChannel {
   }
 }
 
+// ── 入站附件下载（小艺 → 我） ─────────────────────────────────────────────────
+//
+// A2A 入站的 file part 形状（华为《消息流》文档 + 参照实现一致）：
+//   { kind: 'file', file: { name, mimeType, uri } }
+// 处理办法：把 uri 抓下来存到 ~/.dsh/xiaoyi/media/，把本地路径连同说明塞进会话文本，
+// 这样会话里的 agent 可以直接 read_image / read。
+
+function safeFileName(name) {
+  const base = String(name || ('file-' + Date.now())).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/^\.+/, '')
+  return base.slice(0, 120) || ('file-' + Date.now())
+}
+
+const MIME_EXT = {
+  'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+  'image/webp': '.webp', 'image/bmp': '.bmp', 'image/heic': '.heic', 'image/svg+xml': '.svg',
+  'application/pdf': '.pdf', 'text/plain': '.txt', 'text/markdown': '.md',
+  'application/json': '.json', 'application/zip': '.zip',
+  'audio/mpeg': '.mp3', 'audio/wav': '.wav', 'audio/amr': '.amr', 'audio/aac': '.aac',
+  'video/mp4': '.mp4',
+}
+
+async function downloadInboundFiles(fileParts) {
+  const dir = join(homedir(), '.dsh', 'xiaoyi', 'media')
+  const out = []
+  try { mkdirSync(dir, { recursive: true }) } catch (e) { /* ignore */ }
+  for (const part of fileParts || []) {
+    const f = (part && part.file) || {}
+    const uri = String(f.uri || '')
+    const rawName = String(f.name || f.fileName || '')
+    const mime = String(f.mimeType || '')
+    if (!uri) { out.push({ ok: false, name: rawName, mimeType: mime, error: '没有 uri' }); continue }
+    let name = safeFileName(rawName || ('file-' + Date.now()))
+    if (!/\.[A-Za-z0-9]{1,5}$/.test(name) && MIME_EXT[mime.toLowerCase()]) name += MIME_EXT[mime.toLowerCase()]
+    const dest = join(dir, Date.now() + '_' + Math.random().toString(36).slice(2, 6) + '_' + name)
+    try {
+      const ctl = new AbortController()
+      const timer = setTimeout(() => ctl.abort(), 60000)
+      let res
+      try {
+        res = await fetch(uri, { signal: ctl.signal, headers: { 'User-Agent': 'dsh-xiaoyi/0.1' } })
+      } finally { clearTimeout(timer) }
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      const buf = Buffer.from(await res.arrayBuffer())
+      writeFileSync(dest, buf)
+      out.push({ ok: true, path: dest, name: rawName || name, mimeType: mime || res.headers.get('content-type') || '', bytes: buf.length })
+      log('已下载小艺附件 → ' + dest + '（' + buf.length + ' 字节）')
+    } catch (e) {
+      const err = String((e && e.message) || e)
+      out.push({ ok: false, name: rawName || name, mimeType: mime, uri, error: err })
+      log('下载小艺附件失败：' + err + ' uri=' + uri.slice(0, 120))
+    }
+  }
+  return out
+}
+
 // ── 回复文本提取（只取可见正文，跳过 reasoning） ───────────────────────────────
 
 function extractReplyText(msg) {
@@ -519,19 +574,35 @@ export function apply(ctx) {
     wsUrl: state.wsUrl,
     onRequest: (req) => {
       pending.push(req)
-      ensureListen().then(() => {
-        const h = listenHandle
-        if (!h) {
-          channel.sendArtifact(req.sessionId, req.taskId, req.messageId, '我这边还没起来（DSH 会话未就绪），请稍后再试。', true)
-          pending = pending.filter((p) => p !== req)
-          return
-        }
-        const files = (req.fileParts || []).map((p) => (p.file && (p.file.uri || p.file.name)) || '').filter(Boolean)
-        let text = '【小艺】' + (req.text || '')
-        if (files.length) text += '\n\n附带文件（如需下载请告诉我）：\n' + files.map((f) => '- ' + f).join('\n')
-        currentReply = ''
-        active = req
+      void (async () => {
         try {
+          await ensureListen()
+          const h = listenHandle
+          if (!h) {
+            channel.sendArtifact(req.sessionId, req.taskId, req.messageId, '我这边还没起来（DSH 会话未就绪），请稍后再试。', true)
+            pending = pending.filter((p) => p !== req)
+            return
+          }
+          // 入站附件：先抓到本地，再把路径交给会话里的 agent
+          let files = []
+          if (req.fileParts && req.fileParts.length) {
+            log('入站 parts 原文：' + safeJson(req.parts).slice(0, 1200))
+            files = await downloadInboundFiles(req.fileParts)
+          }
+          let text = '【小艺】' + (req.text || '')
+          if (files.length) {
+            const okList = files.filter((f) => f.ok)
+            const badList = files.filter((f) => !f.ok)
+            if (okList.length) {
+              text += '\n\n附件已下载到本地（可用 read_image / read 工具查看）：\n'
+                + okList.map((f) => '- ' + f.path + '（' + (f.mimeType || '未知类型') + '，' + f.bytes + ' 字节，原名 ' + f.name + '）').join('\n')
+            }
+            if (badList.length) {
+              text += '\n\n以下附件没抓下来：\n' + badList.map((f) => '- ' + f.name + '（' + f.error + '）').join('\n')
+            }
+          }
+          currentReply = ''
+          active = req
           h.agent.followup({
             id: 'xy-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
             role: 'user',
@@ -539,16 +610,12 @@ export function apply(ctx) {
             source: { kind: 'plugin', plugin: 'dsh-xiaoyi' },
           })
         } catch (e) {
-          log('followup 失败', e && e.message)
-          channel.sendArtifact(req.sessionId, req.taskId, req.messageId, '投递到 DSH 会话失败：' + String((e && e.message) || e), true)
+          log('处理小艺请求失败', e && e.message)
+          channel.sendArtifact(req.sessionId, req.taskId, req.messageId, '处理这条消息时出错了：' + String((e && e.message) || e), true)
           pending = pending.filter((p) => p !== req)
           if (active === req) active = null
         }
-      }).catch((e) => {
-        log('ensureListen 失败', e && e.message)
-        channel.sendArtifact(req.sessionId, req.taskId, req.messageId, 'DSH 会话准备失败：' + String((e && e.message) || e), true)
-        pending = pending.filter((p) => p !== req)
-      })
+      })()
     },
   })
 
