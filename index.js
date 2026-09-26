@@ -463,6 +463,23 @@ class XiaoYiChannel {
       },
     }, sessionId, taskId)
   }
+
+  // 出站"在线文件/图片"：Part 扩展 { url, filename, mediaType }（华为《Part结构定义》）
+  sendArtifactWithFiles(sessionId, taskId, messageId, caption, files, final) {
+    const parts = []
+    if (caption) parts.push({ kind: 'text', text: String(caption) })
+    for (const f of files || []) parts.push({ url: f.url, filename: f.filename, mediaType: f.mediaType })
+    return this._sendJsonRpc(messageId, {
+      result: {
+        taskId,
+        kind: 'artifact-update',
+        append: false,
+        lastChunk: true,
+        final: !!final,
+        artifact: { artifactId: uuid(), parts },
+      },
+    }, sessionId, taskId)
+  }
 }
 
 // ── 入站附件下载（小艺 → 我） ─────────────────────────────────────────────────
@@ -518,6 +535,57 @@ async function downloadInboundFiles(fileParts) {
     }
   }
   return out
+}
+
+// ── 出站"在线文件/图片"的发布（我 → 小艺） ──────────────────────────────────
+//
+// 协议要求回给端侧的文件必须是**公网 https 地址**（Part 扩展：url + filename + mediaType）。
+// 三种发布方式：
+//   local  —— 复制到 ~/.dsh/xiaoyi/public/，用插件自己的 HTTP 路由对外提供，
+//             再配合一条隧道（如 localhost.run）把 state.publicBaseUrl 指过来：文件不出门
+//   catbox —— 上传到 catbox.moe（第三方图床，一条命令拿到 https 链接）
+//   none   —— 不发布，直接报错说明
+
+const EXT_MIME = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.bmp': 'image/bmp', '.pdf': 'application/pdf',
+  '.csv': 'text/csv', '.txt': 'text/plain', '.md': 'text/plain', '.json': 'text/plain',
+}
+
+function mimeOfName(name) {
+  const m = String(name || '').toLowerCase().match(/\.[a-z0-9]{1,5}$/)
+  return (m && EXT_MIME[m[0]]) || 'application/octet-stream'
+}
+
+function publicDir() {
+  const d = join(homedir(), '.dsh', 'xiaoyi', 'public')
+  try { mkdirSync(d, { recursive: true }) } catch (e) { /* ignore */ }
+  return d
+}
+
+function copyToPublic(filePath) {
+  const name = safeFileName(require$basename(filePath))
+  const dest = join(publicDir(), Date.now().toString(36) + '_' + name)
+  writeFileSync(dest, readFileSync(filePath))
+  return { dest, name, mediaType: mimeOfName(name) }
+}
+
+async function uploadToCatbox(filePath) {
+  const name = require$basename(filePath)
+  const buf = readFileSync(filePath)
+  const fd = new FormData()
+  fd.append('reqtype', 'fileupload')
+  fd.append('fileToUpload', new Blob([buf]), name)
+  const res = await fetch('https://catbox.moe/user/api.php', { method: 'POST', body: fd })
+  const text = (await res.text()).trim()
+  if (!/^https?:\/\//.test(text)) throw new Error('catbox 返回异常：' + text.slice(0, 200))
+  return { url: text, filename: name, mediaType: mimeOfName(name) }
+}
+
+function require$basename(p) {
+  const s = String(p || '')
+  const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'))
+  return i >= 0 ? s.slice(i + 1) : s
 }
 
 // ── 回复文本提取（只取可见正文，跳过 reasoning） ───────────────────────────────
@@ -667,32 +735,43 @@ export function apply(ctx) {
           if (presetId) setup = async (agentCtx) => { await presets.mount(agentCtx, presetId) }
         } catch (e) { /* ignore */ }
       }
-      // 先尝试 resume
+      // 先尝试 resume：优先用状态里记住的那条会话，尽量不新开对话（用户明确要求"跟其它通道一样只留一条"）
+      async function tryResume(id) {
+        if (!id || typeof agents.resume !== 'function') return null
+        if (typeof agents.get === 'function') {
+          try {
+            const live = agents.get(id)
+            if (live && live.agent) { log('会话 ' + id + ' 已在本进程里活着，直接复用'); return live }
+          } catch (e) { /* ignore */ }
+        }
+        const o = { resumeSessionId: id }
+        if (setup) o.setup = setup
+        if (model.provider && model.model) o.agentOptions = { provider: model.provider, model: model.model }
+        try {
+          const h = await agents.resume(o)
+          log('已复用会话 ' + id)
+          return h
+        } catch (e) {
+          log('resume ' + id + ' 失败：' + String((e && e.message) || e))
+          return null
+        }
+      }
       let storedId = String(state.sessionId || '')
       if (!storedId) {
         storedId = findLatestListenSessionId()
         if (storedId) log('从磁盘找回会话 ' + storedId)
       }
-      if (storedId && typeof agents.resume === 'function') {
-        let alive = false
-        if (typeof agents.get === 'function') {
-          try { alive = Boolean(agents.get(storedId)) } catch (e) { /* ignore */ }
-        }
-        if (alive) {
-          log('会话 ' + storedId + ' 已在本进程里活着，不再 resume')
-        } else {
-          const opts = { resumeSessionId: storedId }
-          if (setup) opts.setup = setup
-          if (model.provider && model.model) opts.agentOptions = { provider: model.provider, model: model.model }
-          try {
-            const resumed = await agents.resume(opts)
-            listenHandle = resumed
-            log('已复用会话 ' + storedId)
-            return resumed
-          } catch (e) {
-            log('resume ' + storedId + ' 失败，改为新建', e && e.message)
-          }
-        }
+      let handle = await tryResume(storedId)
+      if (!handle) {
+        const alt = findLatestListenSessionId()
+        if (alt && alt !== storedId) handle = await tryResume(alt)
+      }
+      if (handle) {
+        listenHandle = handle
+        try {
+          if (handle.agent && handle.agent.id) { state.sessionId = handle.agent.id; saveState(state) }
+        } catch (e) { /* ignore */ }
+        return handle
       }
       const sessionId = 'xiaoyi-listen-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
       // 工作目录必须是可写的：宿主可能从 系统目录 启动，
@@ -820,6 +899,70 @@ export function apply(ctx) {
       if (!req) return { ok: false, error: '当前没有进行中的小艺会话' }
       const sent = channel.sendStatus(req.sessionId, req.taskId, req.messageId, text, 'working', false)
       return { ok: Boolean(sent), sessionId: req.sessionId, taskId: req.taskId }
+    },
+  }))
+
+  // 出站图片/文件：把本地文件变成公网 https 链接再回给小艺
+  const pubRoutes = new Set()
+  function registerPublicRoute(name) {
+    if (pubRoutes.has(name)) return
+    pubRoutes.add(name)
+    const p = '/xiaoyi/public/' + name
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'exact',
+      path: p,
+      handler: async (_req, res) => {
+        try {
+          const buf = readFileSync(join(publicDir(), name))
+          res.writeHead(200, { 'content-type': mimeOfName(name), 'cache-control': 'public, max-age=600' })
+          res.end(buf)
+        } catch (e) {
+          res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('not found')
+        }
+      },
+    }), 'xiaoyi: pub ' + name)
+  }
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'xiaoyi_send_photo',
+    description: 'Send a local image or file to the current 小艺 conversation as an online file. The 小艺 protocol only accepts public https URLs for outbound files, so the file is either served locally (mode=local, needs a configured publicBaseUrl + tunnel) or uploaded to catbox.moe (mode=catbox, third-party host). Requires an active 小艺 task.',
+    parameters: {
+      type: 'object',
+      properties: {
+        filePath: { type: 'string', description: '本地文件的绝对路径（图片推荐 png/jpg/gif/webp/bmp）' },
+        caption: { type: 'string', description: '随文件一起发的说明文字（可省）' },
+        mode: { type: 'string', description: 'local=本机起路由+隧道（文件不出门）；catbox=上传第三方图床。默认 local，没有 publicBaseUrl 时自动回退 catbox' },
+      },
+      required: ['filePath'],
+    },
+    output: outSchema,
+    async execute(args) {
+      const a = args && typeof args === 'object' ? args : {}
+      const filePath = String(a.filePath || '')
+      if (!filePath || !existsSync(filePath)) return { ok: false, error: '文件不存在：' + filePath }
+      const req = active || pending[0]
+      if (!req) return { ok: false, error: '当前没有进行中的小艺会话（得先在小艺里说句话）' }
+      const mode = String(a.mode || (state.publicBaseUrl ? 'local' : (state.imageHost || 'catbox')))
+      let file = null
+      try {
+        if (mode === 'local') {
+          const base = String(state.publicBaseUrl || '').replace(/\/+$/, '')
+          if (!base) return { ok: false, error: '没配 publicBaseUrl（本机模式需要一条隧道把 3080 暴露出去）' }
+          const c = copyToPublic(filePath)
+          registerPublicRoute(require$basename(c.dest))
+          file = { url: base + '/xiaoyi/public/' + require$basename(c.dest), filename: c.name, mediaType: c.mediaType }
+        } else if (mode === 'catbox') {
+          file = await uploadToCatbox(filePath)
+        } else {
+          return { ok: false, error: '不支持的 mode：' + mode }
+        }
+        const sent = channel.sendArtifactWithFiles(req.sessionId, req.taskId, req.messageId, a.caption || '', [file], true)
+        log('已向小艺发送文件 url=' + file.url)
+        return { ok: Boolean(sent), mode, file }
+      } catch (e) {
+        return { ok: false, error: String((e && e.message) || e) }
+      }
     },
   }))
 
