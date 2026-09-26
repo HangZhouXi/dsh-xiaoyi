@@ -624,9 +624,13 @@ export function apply(ctx) {
   function findLatestListenSessionId() {
     try {
       const root = join(homedir(), '.dsh', 'sessions')
+      // 只认工作目录正确的那一档（DSH 用 `--C-Users-Alice-Desktop--` 这种目录名编码 cwd）
+      const wantCwd = String(state.cwd || join(homedir(), 'Desktop'))
+      const wantTag = '--' + wantCwd.replace(/[:\\/]/g, '-') + '--'
       let best = ''
       let bestTime = 0
       for (const ws of readdirSync(root)) {
+        if (ws !== wantTag) continue
         let entries
         try { entries = readdirSync(join(root, ws)) } catch (e) { continue }
         for (const nm of entries) {
@@ -691,14 +695,18 @@ export function apply(ctx) {
         }
       }
       const sessionId = 'xiaoyi-listen-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
-      const opts = { sessionId, meta: { cwd: process.cwd() }, agentOptions: { provider: model.provider, model: model.model } }
+      // 工作目录必须是可写的：宿主可能从 系统目录 启动，
+      // 那样会话沙箱（workspace-write）连临时文件都建不了，会话里啥也干不成。
+      const cwd = String(state.cwd || join(homedir(), 'Desktop'))
+      const opts = { sessionId, meta: { cwd }, agentOptions: { provider: model.provider, model: model.model } }
       if (setup) opts.setup = setup
       const created = await agents.create(opts)
       listenHandle = created
       if (created && created.agent && created.agent.id) {
         state.sessionId = created.agent.id
+        state.cwd = cwd
         saveState(state)
-        log('已新建会话 ' + created.agent.id)
+        log('已新建会话 ' + created.agent.id + '（工作目录 ' + cwd + '）')
       }
       return created
     } catch (e) {
