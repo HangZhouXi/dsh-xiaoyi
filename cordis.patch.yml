@@ -1,0 +1,5 @@
+# dsh-xiaoyi bundle patch
+# 注册宿主端插件：小艺通道（华为云长连接）+ agent 工具 + /xiaoyi/* HTTP 路由。
+- insert:
+    - id: dsh-xiaoyi
+      name: dsh-xiaoyi

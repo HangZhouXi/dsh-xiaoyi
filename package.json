@@ -1,0 +1,33 @@
+{
+  "name": "dsh-xiaoyi",
+  "version": "0.1.0",
+  "description": "小艺通道：把「小艺开放平台 · OpenClaw 模式」当作 DSH 插件接入（华为云 wss 长连接 + AK/SK 鉴权 + A2A 消息收发），让小艺成为DSH在手机上的一只手。只用 node 内置模块实现，无第三方依赖。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "dsh-plugin",
+    "xiaoyi",
+    "小艺",
+    "openclaw",
+    "a2a"
+  ],
+  "license": "MIT"
+}
