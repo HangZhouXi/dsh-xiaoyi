@@ -706,7 +706,7 @@ export function apply(ctx) {
             id: 'xy-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
             role: 'user',
             content: [{ type: 'text', text }],
-            source: { kind: 'plugin', plugin: 'dsh-xiaoyi' },
+            source: { kind: 'plugin:dsh-xiaoyi' },
           })
         } catch (e) {
           log('处理小艺请求失败', e && e.message)
