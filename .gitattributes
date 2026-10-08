@@ -1,0 +1,18 @@
+# 统一换行符，避免 Windows 提交后 Linux/macOS 用户看到的全是 CRLF 差异
+* text=auto eol=lf
+
+# 二进制资源不要做任何文本转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tgz binary
+
+# 这些文件在 Windows 上保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

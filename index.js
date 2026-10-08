@@ -1,6 +1,6 @@
-// dsh-xiaoyi —— 小艺通道（把「小艺开放平台 · OpenClaw 模式」接进 DSH，当一只手用）
+// dsh-xiaoyi —— 小艺通道（把「小艺开放平台 · OpenClaw 模式」接入 DSH 宿主）
 //
-// 链路：手机小艺 →（华为云 wss 长连接）→ 本插件 → DSH 会话（DSH）→ 回复按 A2A 帧发回小艺
+// 链路：手机小艺 →（华为云 wss 长连接）→ 本插件 → DSH 会话 → 回复按 A2A 帧发回小艺
 //
 // 设计原则
 //  1) 只依赖 node 内置模块（含自研极简 WebSocket 客户端），不引第三方包：
@@ -23,7 +23,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs'
-import { randomBytes, createHmac } from 'node:crypto'
+import { randomBytes, createHmac, createHash } from 'node:crypto'
 import tls from 'node:tls'
 import net from 'node:net'
 
@@ -92,6 +92,8 @@ class MiniWS {
     this.handshaken = false
     this.open = false
     this.closed = false
+    this.closeEmitted = false        // 保证 onclose 只发一次（error 与 close 会各来一次）
+    this.wsKey = ''                  // 握手用的 Sec-WebSocket-Key，用来校验 Accept
     this.fragOpcode = 0
     this.fragChunks = []
     this.onopen = null
@@ -106,6 +108,7 @@ class MiniWS {
     try { u = new URL(this.url) } catch (e) { this._fail(e); return }
     const port = u.port ? Number(u.port) : (u.protocol === 'wss:' ? 443 : 80)
     const key = randomBytes(16).toString('base64')
+    this.wsKey = key
     const path = (u.pathname || '/') + (u.search || '')
     const lines = [
       'GET ' + path + ' HTTP/1.1',
@@ -160,6 +163,8 @@ class MiniWS {
   }
 
   _closed() {
+    if (this.closeEmitted) return      // 幂等：socket 的 error 与 close 会各来一次，只认第一次
+    this.closeEmitted = true
     const wasOpen = this.open
     this.open = false
     try { if (this.sock) this.sock.destroy() } catch (e) { /* ignore */ }
@@ -201,8 +206,21 @@ class MiniWS {
       }
       const head = this.buf.slice(0, idx).toString('latin1')
       this.buf = this.buf.slice(idx + 4)
-      const status = head.split('\r\n')[0] || ''
+      const headLines = head.split('\r\n')
+      const status = headLines[0] || ''
       if (!/ 101\b/.test(status)) { this._fail(new Error('handshake failed: ' + status)); return }
+      // RFC6455 要求客户端校验 Sec-WebSocket-Accept = base64(SHA1(key + GUID))。
+      // 少了这一步，一个"长得像"的 HTTP 端点（或中间人）也能骗过握手。
+      const hdrs = {}
+      for (let i = 1; i < headLines.length; i++) {
+        const j = headLines[i].indexOf(':')
+        if (j > 0) hdrs[headLines[i].slice(0, j).trim().toLowerCase()] = headLines[i].slice(j + 1).trim()
+      }
+      const expect = createHash('sha1').update(this.wsKey + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+      if (hdrs['sec-websocket-accept'] !== expect) {
+        this._fail(new Error('handshake failed: Sec-WebSocket-Accept 不匹配'))
+        return
+      }
       this.handshaken = true
       this.open = true
       if (this.onopen) { try { this.onopen() } catch (e) { log('onopen threw', e && e.message) } }
@@ -525,6 +543,67 @@ const MIME_EXT = {
   'video/mp4': '.mp4',
 }
 
+// ── 入站 URI 的安全闸门（SSRF 防护） ─────────────────────────────────────────
+//
+// 入站 file part 的 uri 来自**外部消息**，属于不可信输入，不能直接抓：
+//   1) 只允许 http/https（挡掉 file:、data: 等协议）
+//   2) 挡掉环回 / 私网 / 链路本地地址 —— 否则可以拿它当跳板探测内网，
+//      甚至读到云环境的元数据服务（169.254.169.254）
+//   3) 重定向之后要再查一遍：公网地址 302 到 127.0.0.1 是最常见的绕过手法
+
+function isPrivateIp(ip) {
+  const v = String(ip || '')
+  if (net.isIPv4(v)) {
+    const p = v.split('.').map(Number)
+    if (p[0] === 0 || p[0] === 10 || p[0] === 127) return true
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true
+    if (p[0] === 192 && p[1] === 168) return true
+    if (p[0] === 169 && p[1] === 254) return true                 // 链路本地（云元数据）
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true    // 运营商 CGNAT
+    if (p[0] >= 224) return true                                  // 组播 / 保留段
+    return false
+  }
+  if (net.isIPv6(v)) {
+    const s = v.toLowerCase()
+    if (s === '::' || s === '::1') return true
+    if (s.startsWith('fe80') || s.startsWith('fc') || s.startsWith('fd')) return true
+    if (s.startsWith('::ffff:')) return isPrivateIp(s.slice(7))   // IPv4-mapped
+    return false
+  }
+  return false
+}
+
+function checkInboundUri(uri) {
+  let u
+  try { u = new URL(String(uri)) } catch (e) { return '不是合法的 URL' }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return '只允许 http/https 链接（收到 ' + u.protocol + '）'
+  const host = u.hostname.replace(/^\[|\]$/g, '')
+  if (/^(localhost|.+\.local|.+\.internal|.+\.localhost)$/i.test(host)) return '拒绝访问本机/内网地址：' + host
+  if (net.isIP(host) && isPrivateIp(host)) return '拒绝访问内网地址：' + host
+  return ''
+}
+
+// 流式读取并卡上限：只信 content-length 会被"少报体积"的响应把内存打爆
+async function readBodyCapped(res, max) {
+  const tooBig = (n) => new Error('文件太大：' + (n / 1048576).toFixed(1) + ' MB（上限 ' + (max / 1048576) + ' MB）')
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const b = Buffer.from(await res.arrayBuffer())
+    if (b.length > max) throw tooBig(b.length)
+    return b
+  }
+  const reader = res.body.getReader()
+  const chunks = []
+  let total = 0
+  for (;;) {
+    const step = await reader.read()
+    if (step.done) break
+    total += step.value.length
+    if (total > max) { try { await reader.cancel() } catch (e) { /* ignore */ } ; throw tooBig(total) }
+    chunks.push(Buffer.from(step.value))
+  }
+  return Buffer.concat(chunks)
+}
+
 async function downloadInboundFiles(fileParts) {
   const dir = join(homedir(), '.dsh', 'xiaoyi', 'media')
   const out = []
@@ -535,6 +614,12 @@ async function downloadInboundFiles(fileParts) {
     const rawName = String(f.name || f.fileName || '')
     const mime = String(f.mimeType || '')
     if (!uri) { out.push({ ok: false, name: rawName, mimeType: mime, error: '没有 uri' }); continue }
+    const risky = checkInboundUri(uri)
+    if (risky) {
+      out.push({ ok: false, name: rawName, mimeType: mime, uri, error: risky })
+      log('拒绝下载附件：' + risky + ' uri=' + uri.slice(0, 120))
+      continue
+    }
     let name = safeFileName(rawName || ('file-' + Date.now()))
     if (!/\.[A-Za-z0-9]{1,5}$/.test(name) && MIME_EXT[mime.toLowerCase()]) name += MIME_EXT[mime.toLowerCase()]
     const dest = join(dir, Date.now() + '_' + Math.random().toString(36).slice(2, 6) + '_' + name)
@@ -546,16 +631,16 @@ async function downloadInboundFiles(fileParts) {
         res = await fetch(uri, { signal: ctl.signal, headers: { 'User-Agent': 'dsh-xiaoyi/0.1' } })
       } finally { clearTimeout(timer) }
       if (!res.ok) throw new Error('HTTP ' + res.status)
+      // 重定向之后落点要再查一遍：公网链接 302 到 127.0.0.1 是典型的绕过手法
+      const landed = checkInboundUri(res.url || uri)
+      if (landed) throw new Error('重定向到不可信地址：' + landed)
       // 体积闸门：别让一个大附件把磁盘塞满（默认 50 MB 上限）
       const MAX_INBOUND = 50 * 1024 * 1024
       const declared = Number(res.headers.get('content-length') || 0)
       if (declared && declared > MAX_INBOUND) {
         throw new Error('文件太大：' + (declared / 1048576).toFixed(1) + ' MB（上限 50 MB）')
       }
-      const buf = Buffer.from(await res.arrayBuffer())
-      if (buf.length > MAX_INBOUND) {
-        throw new Error('文件太大：' + (buf.length / 1048576).toFixed(1) + ' MB（上限 50 MB）')
-      }
+      const buf = await readBodyCapped(res, MAX_INBOUND)
       writeFileSync(dest, buf)
       out.push({ ok: true, path: dest, name: rawName || name, mimeType: mime || res.headers.get('content-type') || '', bytes: buf.length })
       log('已下载小艺附件 → ' + dest + '（' + buf.length + ' 字节）')
@@ -596,7 +681,8 @@ function publicDir() {
 
 function copyToPublic(filePath) {
   const name = safeFileName(require$basename(filePath))
-  const dest = join(publicDir(), Date.now().toString(36) + '_' + name)
+  // 公开链接必须不可猜：只用时间戳的话，别人按时间枚举就能把发出去的文件全捞走
+  const dest = join(publicDir(), Date.now().toString(36) + '-' + randomBytes(8).toString('hex') + '-' + name)
   writeFileSync(dest, readFileSync(filePath))
   return { dest, name, mediaType: mimeOfName(name) }
 }
@@ -651,7 +737,7 @@ function hasToolCalls(msg) {
 }
 
 // 供离线自测脚本使用（不参与插件加载）
-export { MiniWS, XiaoYiChannel, extractReplyText, hasToolCalls }
+export { MiniWS, XiaoYiChannel, extractReplyText, hasToolCalls, checkInboundUri, isPrivateIp }
 
 // ── 插件主体 ──────────────────────────────────────────────────────────────────
 
@@ -661,7 +747,7 @@ export function apply(ctx) {
   if (!state.wsUrl) state.wsUrl = DEFAULT_WS_URL
 
   let listenHandle = null
-  let listenStarting = false
+  let listenPromise = null    // 正在进行的会话初始化（并发共用，避免误判"未就绪"）
   let pending = []            // 待回复的小艺请求队列（FIFO）：回复永远对着队首
   let currentReply = ''       // 本回合最近一段正文
 
@@ -702,11 +788,19 @@ export function apply(ctx) {
           // 注意：这里**不**动 currentReply / 不认领 active——
           // 多条消息可能排队进来，回复一律认队首（finishTurn 里 shift），
           // 否则第二条会把第一条的正文顶掉、还把回帧挂到错的 taskId 上。
-          h.agent.followup({
+          //
+          // 必须兜住 followup 的失败：Node 默认把「未处理的 Promise 拒绝」当致命错误，
+          // 一个没接住的拒绝能直接把宿主进程带走。失败时也要回帧 + 出队，别让任务卡死在队列里。
+          const followed = h.agent.followup({
             id: 'xy-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
             role: 'user',
             content: [{ type: 'text', text }],
             source: { kind: 'plugin:dsh-xiaoyi' },
+          })
+          Promise.resolve(followed).catch((e) => {
+            log('投递会话失败', e && e.message)
+            channel.sendArtifact(req.sessionId, req.taskId, req.messageId, '把消息投递给 DSH 会话时出错了：' + String((e && e.message) || e), true)
+            pending = pending.filter((p) => p !== req)
           })
         } catch (e) {
           log('处理小艺请求失败', e && e.message)
@@ -742,20 +836,23 @@ export function apply(ctx) {
         try { entries = readdirSync(join(root, ws)) } catch (e) { continue }
         for (const nm of entries) {
           if (nm.indexOf('xiaoyi-listen-') !== 0) continue
-          try {
-            const st = statSync(join(root, ws, nm, 'session.v3.jsonl.zstd'))
-            if (st.mtimeMs > bestTime) { bestTime = st.mtimeMs; best = nm }
-          } catch (e) { /* 没有会话文件 */ }
+          // 会话文件格式会随宿主升级换代（v3 → v4）。只认死一个版本名，
+          // 升级过的会话就会"看不见"，冷启动于是每次都新开一条对话。
+          let mtime = 0
+          for (const fname of ['session.v4.jsonl.zstd', 'session.v3.jsonl.zstd']) {
+            try {
+              const st = statSync(join(root, ws, nm, fname))
+              if (st.mtimeMs > mtime) mtime = st.mtimeMs
+            } catch (e) { /* 该版本文件不存在，试下一个 */ }
+          }
+          if (mtime > bestTime) { bestTime = mtime; best = nm }
         }
       }
       return best
     } catch (e) { return '' }
   }
 
-  async function ensureListen() {
-    if (listenHandle) return listenHandle
-    if (listenStarting) return null
-    listenStarting = true
+  async function doEnsureListen() {
     try {
       const agents = ctx.get('agents')
       if (!agents || typeof agents.create !== 'function') { log('agents 服务不可用'); return null }
@@ -774,7 +871,7 @@ export function apply(ctx) {
           if (presetId) setup = async (agentCtx) => { await presets.mount(agentCtx, presetId) }
         } catch (e) { /* ignore */ }
       }
-      // 先尝试 resume：优先用状态里记住的那条会话，尽量不新开对话（用户明确要求"跟其它通道一样只留一条"）
+      // 先尝试 resume：优先用状态里记住的那条会话，尽量不重复新开对话
       async function tryResume(id) {
         if (!id || typeof agents.resume !== 'function') return null
         if (typeof agents.get === 'function') {
@@ -830,9 +927,19 @@ export function apply(ctx) {
     } catch (e) {
       log('ensureListen 异常', e && e.message)
       return null
-    } finally {
-      listenStarting = false
     }
+  }
+
+  // 并发保护：多条小艺消息可能几乎同时到达。老写法里第二条一看到"正在初始化"就直接返回 null，
+  // 用户会收到「DSH 会话未就绪」这种**假故障**。改成复用同一个进行中的 Promise。
+  function ensureListen() {
+    if (listenHandle) return Promise.resolve(listenHandle)
+    if (listenPromise) return listenPromise
+    const p = doEnsureListen()
+    listenPromise = p
+    const clear = () => { if (listenPromise === p) listenPromise = null }
+    p.then(clear, clear)
+    return p
   }
 
   // ── 回复回传小艺 ──────────────────────────────────────────────────────────
@@ -965,13 +1072,13 @@ export function apply(ctx) {
 
   ctx.effect(() => ctx.tools.register({
     name: 'xiaoyi_send_photo',
-    description: 'Send a local image or file to the current 小艺 conversation as an online file. The 小艺 protocol only accepts public https URLs for outbound files, so the file is either served locally (mode=local, needs a configured publicBaseUrl + tunnel) or uploaded to catbox.moe (mode=catbox, third-party host). Requires an active 小艺 task.',
+    description: 'Send a local image or file to the current 小艺 conversation as an online file. The 小艺 protocol only accepts public https URLs for outbound files, so the file is either served locally (mode=local, needs a configured publicBaseUrl + tunnel) or uploaded to catbox.moe (mode=catbox, third-party host, must be requested explicitly). Requires an active 小艺 task.',
     parameters: {
       type: 'object',
       properties: {
         filePath: { type: 'string', description: '本地文件的绝对路径（图片推荐 png/jpg/gif/webp/bmp）' },
         caption: { type: 'string', description: '随文件一起发的说明文字（可省）' },
-        mode: { type: 'string', description: 'local=本机起路由+隧道（文件不出门）；catbox=上传第三方图床。默认 local，没有 publicBaseUrl 时自动回退 catbox' },
+        mode: { type: 'string', description: 'local=本机起路由+隧道（文件不出门，默认）；catbox=上传第三方图床 catbox.moe（必须显式指定）' },
       },
       required: ['filePath'],
     },
@@ -982,12 +1089,15 @@ export function apply(ctx) {
       if (!filePath || !existsSync(filePath)) return { ok: false, error: '文件不存在：' + filePath }
       const req = pending[0]
       if (!req) return { ok: false, error: '当前没有进行中的小艺会话（得先在小艺里说句话）' }
-      const mode = String(a.mode || (state.publicBaseUrl ? 'local' : (state.imageHost || 'catbox')))
+      // 隐私优先：默认只走本机（文件不出门）。要传第三方图床必须**显式**开启
+      // （调用时传 mode="catbox"，或在 state.json 里写 "imageHost": "catbox"）。
+      // 老版本会在没配隧道时静默回退到 catbox，用户根本不知道自己的文件被传了出去。
+      const mode = String(a.mode || state.imageHost || 'local')
       let file = null
       try {
         if (mode === 'local') {
           const base = String(state.publicBaseUrl || '').replace(/\/+$/, '')
-          if (!base) return { ok: false, error: '没配 publicBaseUrl（本机模式需要一条隧道把 3080 暴露出去）' }
+          if (!base) return { ok: false, error: '没配 publicBaseUrl：本机模式需要一条隧道（如 localhost.run）把 DSH 的端口暴露成公网 https；不想用隧道就显式传 mode="catbox"（会把文件上传到第三方图床 catbox.moe）' }
           const c = copyToPublic(filePath)
           registerPublicRoute(require$basename(c.dest))
           file = { url: base + '/xiaoyi/public/' + require$basename(c.dest), filename: c.name, mediaType: c.mediaType }

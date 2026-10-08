@@ -1,3 +1,25 @@
-@node_modules
+node_modules/
+npm-debug.log*
 *.log
 
+# 本地运行态：凭证 / 附件 / 对外发布的文件，绝对不能进仓库
+state.json
+media/
+public/
+
+# 环境变量与密钥文件
+.env
+.env.*
+*.pem
+*.key
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地备份
+*.bak
+*.bak-*
+*.orig
