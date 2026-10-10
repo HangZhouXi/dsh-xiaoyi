@@ -33,6 +33,22 @@ This is **not** plug-and-play. Before installing, make sure you have all three:
 
 > If you cannot obtain item 2, you can still read this repository as a **protocol reference implementation** — `index.js` implements the XiaoYi/OpenClaw handshake, auth, heartbeat and JSON-RPC message exchange in full.
 
+### Where do `AK` / `SK` / `agentId` come from?
+
+**They are issued by Huawei. This project cannot create them for you and cannot tell you whether your account is eligible.** You have to apply for them yourself:
+
+1. Register a **Huawei developer account** and complete **real-name verification** — <https://developer.huawei.com/consumer/cn/register/>
+2. Sign in to the **XiaoYi Open Platform** and create an agent — <https://developer.huawei.com/consumer/cn/hag/hagindex.html#/>
+   When creating it, choose the **OpenClaw mode**. Other modes are not compatible with this plugin.
+3. Take the values from the agent's detail page:
+   - `agentId` — shown in the **AgentCard** block;
+   - `AK` / `SK` — under **Credentials → New credential**. **The SK is displayed only once**, so copy it immediately.
+4. Add your own Huawei account to the agent's **test whitelist**. Until the agent is published, only whitelisted accounts can reach it; it takes effect after a few minutes.
+5. Official documentation for this mode — <https://developer.huawei.com/consumer/cn/doc/doccenter-celia/openclaw-0000002518410344>
+
+> Menu names, entry points and the review process are decided entirely by Huawei and may change at any time. If a step above no longer matches what you see, follow Huawei's own documentation rather than this file.
+> This plugin only **consumes** the three credentials. It never asks Huawei for anything else on your behalf.
+
 ---
 
 ## Features
@@ -40,8 +56,17 @@ This is **not** plug-and-play. Before installing, make sure you have all three:
 - **Zero third-party dependencies.** Only Node built-ins are used, including a **hand-written minimal WebSocket client** (RFC6455 client side: text frames, fragmentation reassembly, ping/pong, and handshake verification). Fewer packages in the plugin tree means fewer chances that one failed package takes the whole host down.
 - **Complete protocol implementation.** Auth signing, init handshake, heartbeat with stale-connection detection, JSON-RPC 2.0 streaming, and control messages (`clearContext` / `tasks/cancel`).
 - **Inbound attachments.** Images and files sent from XiaoYi are downloaded to disk, and their local paths are handed to the agent in the session (ready for `read_image` / `read`).
-- **Outbound online files.** Send local files back to XiaoYi (the protocol only accepts public https URLs; supports a local tunnel or a third-party image host).
+- **Outbound online files (experimental).** Send local files back to XiaoYi (the protocol only accepts public https URLs; supports a local tunnel or a third-party image host). See the direction table below — this direction is **not** reliable.
 - **Session reuse.** On a cold start the plugin resumes the existing session instead of opening a new conversation every time.
+
+### What can travel in each direction
+
+| Direction | Support |
+| --- | --- |
+| **Phone → this plugin**<br>(what you send to XiaoYi) | **Text, voice (transcribed) and images/files all work.** Attachments are downloaded to `~/.dsh/xiaoyi/media/` and their local paths are handed to the agent. |
+| **This plugin → phone**<br>(what you get back in XiaoYi) | **Text works** — the reply body, plus anything sent with `xiaoyi_send`. **Pushing an image or file back to the phone is unreliable**: the protocol accepts only a public https URL, and the XiaoYi client is not guaranteed to render the file part. Treat `xiaoyi_send_photo` as experimental. |
+
+> In short: **the inbound direction is the reliable one.** If your workflow depends on images or files arriving on your phone, do not rely on it.
 
 ---
 
@@ -193,6 +218,7 @@ The Part sent back to the client is `{ url, filename, mediaType }` — **only pu
 
 ## Known limitations
 
+- **A file or image cannot be pushed back to the phone reliably.** The protocol only accepts a public https URL for outbound files, and whether the XiaoYi client renders the resulting file part is outside this project's control. Text replies are unaffected.
 - **Outbound attachments must use a public URL.** This is a protocol constraint, not a shortcut in the implementation.
 - **Inbound attachment URLs are pre-signed and expire in roughly 30 minutes**, so they must be fetched immediately. This plugin does exactly that; if a download fails, the link has most likely expired.
 - **The `media/` directory is never cleaned automatically.** Prune `~/.dsh/xiaoyi/media/` yourself periodically.
@@ -219,7 +245,7 @@ The Part sent back to the client is `{ url, filename, mediaType }` — **only pu
 | Connects then keeps reconnecting | Look for "stale connection" in the log; if nothing (including pong) arrives for over 90 seconds the plugin reconnects on purpose. |
 | XiaoYi messages get no reply | Check `~/.dsh/xiaoyi/xiaoyi.log` and confirm in the host log that the plugin loaded. |
 | Reply says the DSH session is not ready | The very first request after a host start has to create the session; send the message again shortly after. |
-| Sent images do not arrive | The protocol requires a public https URL. Check `publicBaseUrl` and whether your tunnel is still alive. |
+| Sent images do not arrive | This direction is unreliable by design — see "What can travel in each direction". The protocol also requires a public https URL, so check `publicBaseUrl` and whether your tunnel is still alive. |
 
 ---
 

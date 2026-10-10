@@ -33,10 +33,11 @@ All risk and consequence arising from the use of this project rests **entirely w
 ## 3. Credentials and account security
 
 1. This plugin requires your **XiaoYi Open Platform AK / SK / agentId** in order to work.
-2. These credentials are stored as **plain-text JSON** in `~/.dsh/xiaoyi/state.json` on your machine (and may therefore appear in your own configuration backups, disk snapshots or sync folders).
-3. **Safekeeping is entirely your responsibility.** Do not enter anyone else's credentials; do not commit `state.json` to any Git repository, cloud drive, chat log or screenshot.
-4. If credentials leak, whoever holds them can impersonate your agent when talking to Huawei Cloud. **If you suspect a leak, rotate (reset) the AK/SK on the platform immediately.**
-5. This project does **not** upload credentials anywhere by itself; however, the author has no control over your runtime environment, dependency versions, or whether your system has been compromised.
+2. **Those credentials are issued by Huawei, not by this project.** You must register and verify a Huawei developer account and apply for them yourself on the XiaoYi Open Platform (see the README). This project cannot create them, cannot obtain them for you, and cannot tell you whether your account is eligible.
+3. These credentials are stored as **plain-text JSON** in `~/.dsh/xiaoyi/state.json` on your machine (and may therefore appear in your own configuration backups, disk snapshots or sync folders).
+4. **Safekeeping is entirely your responsibility.** Do not enter anyone else's credentials; do not commit `state.json` to any Git repository, cloud drive, chat log or screenshot.
+5. If credentials leak, whoever holds them can impersonate your agent when talking to Huawei Cloud. **If you suspect a leak, rotate (reset) the AK/SK on the platform immediately.**
+6. This project does **not** upload credentials anywhere by itself; however, the author has no control over your runtime environment, dependency versions, or whether your system has been compromised.
 
 ---
 
@@ -64,6 +65,7 @@ Understand the following data flows before use:
 3. **Outbound files** —
    - `local` mode (default): the file is copied to `~/.dsh/xiaoyi/public/` and exposed through this plugin's own HTTP route plus a tunnel you provide;
    - `catbox` mode (must be enabled explicitly): the file is **uploaded to the third-party host catbox.moe**, which amounts to publishing it. Do not upload anything sensitive.
+   - ⚠️ **In either mode, whether the file actually shows up in the XiaoYi client is outside this project's control.** The protocol accepts only a public https URL for outbound files, and what the client does with it is decided by the platform. **Text replies are unaffected.** Do not build a critical workflow on "the image will arrive on my phone".
 4. **Logs** — runtime logs are written to `~/.dsh/xiaoyi/xiaoyi.log` and may contain session ids, task ids, file paths and error messages. Take care where those logs end up.
 5. **The HTTP routes have no authentication** — `/xiaoyi/state` and `/xiaoyi/public/*` carry no identity check. Do **not** expose the DSH port directly to the internet.
 
@@ -128,8 +130,8 @@ That project declares its license in the `license` field of its `package.json`. 
 # Acknowledgements
 
 - **HangZhouXi** (<https://github.com/HangZhouXi>) — project author
-- **DeepSeek V4.1 Flash** — this project was developed and debugged with the help of DeepSeek V4.1 Flash
-- **`@ynhcj/xiaoyi` (official XiaoYi plugin)** — this project's protocol implementation referred to its published artifacts
+- **DeepSeek Flash** — this project was developed and debugged with its help
+- **`@ynhcj/xiaoyi`** — this project's protocol implementation referred to that package's published artifacts. It is **not** an official Huawei project either; see the third-party notice above.
 - **DSH (DeepSeek Harness)** — for providing the plugin host and ecosystem
 
 ---
