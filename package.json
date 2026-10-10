@@ -1,7 +1,7 @@
 {
   "name": "dsh-xiaoyi",
   "version": "0.1.1",
-  "description": "小艺通道：把「小艺开放平台 · OpenClaw 模式」作为 DSH 宿主插件接入（华为云 WebSocket 长连接 + AK/SK 鉴权 + A2A 消息收发）。只用 Node 内置模块实现，零第三方依赖，含自研极简 WebSocket 客户端。",
+  "description": "A DSH (DeepSeek Harness) host plugin that connects Huawei XiaoYi in OpenClaw mode to your local DSH session. Zero third-party dependencies, with a hand-written minimal RFC6455 WebSocket client.",
   "type": "module",
   "main": "index.js",
   "engines": {
@@ -15,7 +15,9 @@
     "index.js",
     "cordis.patch.yml",
     "README.md",
+    "README.zh-CN.md",
     "DISCLAIMER.md",
+    "DISCLAIMER.zh-CN.md",
     "LICENSE"
   ],
   "dsh": {
@@ -26,13 +28,23 @@
   "keywords": [
     "dsh",
     "deepseek-harness",
-    "plugin",
     "dsh-plugin",
+    "cordis",
+    "plugin",
     "xiaoyi",
-    "小艺",
     "openclaw",
+    "huawei",
     "a2a",
     "websocket"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HangZhouXi/dsh-xiaoyi.git"
+  },
+  "homepage": "https://github.com/HangZhouXi/dsh-xiaoyi#readme",
+  "bugs": {
+    "url": "https://github.com/HangZhouXi/dsh-xiaoyi/issues"
+  },
+  "author": "HangZhouXi",
   "license": "MIT"
 }

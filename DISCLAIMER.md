@@ -1,134 +1,137 @@
-# 免责声明与致谢
+# Disclaimer and Acknowledgements
 
-> 本文档是 [`dsh-xiaoyi`](./README.md) 的一部分。**下载、安装、复制、修改或运行本项目，即视为你已阅读、理解并同意以下全部内容。如果你不同意其中任何一条，请不要使用本项目。**
+**English** | [简体中文](./DISCLAIMER.zh-CN.md)
 
----
-
-## 一、软件按「原样」提供
-
-本项目以 **MIT 许可证**开源，按 **"AS IS"（原样）** 提供，不附带任何形式的明示或默示担保，包括但不限于：
-
-- 对**适销性**、**特定用途适用性**、**不侵权**的担保；
-- 对**功能正确性**、**稳定性**、**无中断**、**无错误**的担保；
-- 对**兼容性**（含与任何 DSH 版本、Node.js 版本、操作系统、华为云接口版本的兼容性）的担保。
-
-作者**不承诺**任何形式的技术支持、维护、更新、答疑或缺陷修复。
+> This document is part of [`dsh-xiaoyi`](./README.md). **By downloading, installing, copying, modifying or running this project you are deemed to have read, understood and accepted everything below. If you do not agree with any part of it, please do not use this project.**
 
 ---
 
-## 二、使用风险由使用者自行承担
+## 1. The software is provided "as is"
 
-使用本项目所产生的一切风险与后果，**完全由使用者自行承担**。包括但不限于：
+This project is released under the **MIT License** and is provided **"AS IS"**, without warranty of any kind, express or implied, including but not limited to:
 
-1. **服务中断**：消息丢失、重复投递、回复错位、连接反复断开、会话被意外新建等。
-2. **数据损失**：会话记录损坏、附件下载不完整、`~/.dsh/xiaoyi/` 目录被覆盖或清空、磁盘被附件写满。
-3. **系统影响**：插件运行在 DSH 宿主进程内，**插件的缺陷有可能影响宿主进程本身**（例如连接抖动、重连风暴、资源占用升高）。
-4. **费用**：因本插件触发的模型调用、网络流量、云服务、隧道服务、图床服务所产生的任何费用。
-5. **账号风险**：因使用本插件导致小艺开放平台账号被限制、降级或封禁。
+- merchantability, fitness for a particular purpose, and non-infringement;
+- correctness, stability, uninterrupted operation, or freedom from errors;
+- compatibility with any DSH version, Node.js version, operating system, or Huawei Cloud interface version.
 
----
-
-## 三、凭证与账号安全
-
-1. 本插件需要你提供**小艺开放平台的 AK / SK / agentId** 才能工作。
-2. 这些凭证以**明文 JSON** 形式保存在本机 `~/.dsh/xiaoyi/state.json`（以及可能出现在你的配置备份、磁盘快照、同步盘中）。
-3. **凭证的保管责任完全在你**。请勿把他人的凭证填进来；请勿把 `state.json` 提交到任何 Git 仓库、网盘、聊天记录或截图里。
-4. 一旦凭证泄露，持有者可冒充你的智能体与华为云通信。**发现泄露请立刻在开放平台侧轮换（重置）AK/SK。**
-5. 本项目**不会**主动把凭证上传到任何地方；但作者无法控制你的运行环境、依赖版本、系统是否被入侵等因素。
+The author makes **no commitment** to provide technical support, maintenance, updates, answers, or bug fixes.
 
 ---
 
-## 四、第三方服务与本项目无关
+## 2. You use it at your own risk
 
-本项目只是**调用**下列第三方服务，**与它们没有任何隶属、代理、赞助或背书关系**：
+All risk and consequence arising from the use of this project rests **entirely with the user**, including but not limited to:
 
-| 第三方 | 用途 | 你需要自行遵守 |
+1. **Service disruption** — lost or duplicated messages, replies attached to the wrong task, repeated disconnects, sessions being created unexpectedly.
+2. **Data loss** — corrupted session records, incomplete attachment downloads, overwritten or emptied `~/.dsh/xiaoyi/`, disk filled up by attachments.
+3. **Impact on your system** — the plugin runs inside the DSH host process, so **a defect in the plugin can affect the host process itself** (connection flapping, reconnect storms, elevated resource usage).
+4. **Cost** — any model usage, network traffic, cloud service, tunnel service or image-host fees triggered by this plugin.
+5. **Account risk** — restriction, downgrade or suspension of your XiaoYi Open Platform account.
+
+---
+
+## 3. Credentials and account security
+
+1. This plugin requires your **XiaoYi Open Platform AK / SK / agentId** in order to work.
+2. These credentials are stored as **plain-text JSON** in `~/.dsh/xiaoyi/state.json` on your machine (and may therefore appear in your own configuration backups, disk snapshots or sync folders).
+3. **Safekeeping is entirely your responsibility.** Do not enter anyone else's credentials; do not commit `state.json` to any Git repository, cloud drive, chat log or screenshot.
+4. If credentials leak, whoever holds them can impersonate your agent when talking to Huawei Cloud. **If you suspect a leak, rotate (reset) the AK/SK on the platform immediately.**
+5. This project does **not** upload credentials anywhere by itself; however, the author has no control over your runtime environment, dependency versions, or whether your system has been compromised.
+
+---
+
+## 4. Third-party services are unrelated to this project
+
+This project merely **calls** the following third-party services. It has **no affiliation, agency, sponsorship or endorsement relationship** with them:
+
+| Third party | Purpose | You must comply with |
 | --- | --- | --- |
-| **华为云 · 小艺开放平台（OpenClaw 模式）** | WebSocket 长连接与消息通道 | 其服务条款、开发者协议、内容规范、配额与计费规则 |
-| **catbox.moe** | 可选：出站文件上传（第三方图床） | 其服务条款与内容政策；**上传即意味着你的文件离开了本机** |
-| **任意隧道服务**（如 localhost.run） | 可选：把本机端口暴露成公网 https | 其服务条款与隐私政策 |
-| **DSH（DeepSeek Harness）** | 宿主运行环境 | 其自身的使用条款 |
+| **Huawei Cloud · XiaoYi Open Platform (OpenClaw mode)** | WebSocket connection and messaging channel | Its terms of service, developer agreement, content policies, quotas and billing rules |
+| **catbox.moe** | Optional: outbound file upload (third-party image host) | Its terms of service and content policy; **uploading means your file leaves your machine** |
+| **Any tunnel service** (e.g. localhost.run) | Optional: expose a local port as public https | Its terms of service and privacy policy |
+| **DSH (DeepSeek Harness)** | Host runtime environment | Its own terms of use |
 
-以上任一服务的**变更、限流、收费、停止服务或封禁**，都可能导致本插件失效，**作者不承担任何责任，也无义务跟进适配**。
-
----
-
-## 五、数据与隐私
-
-请在使用前明确知晓本插件的数据流向：
-
-1. **入站消息**：小艺发来的文本会作为一条用户消息**投递进你本机的 DSH 会话**，因此会进入你的会话记录，并可能被发送给你所配置的模型服务商。
-2. **入站附件**：附件会被**下载并保存到本机** `~/.dsh/xiaoyi/media/`，路径会被交给会话内的 agent 处理。本插件不会自动清理该目录。
-3. **出站文件**：
-   - `local` 模式（默认）：文件复制到 `~/.dsh/xiaoyi/public/`，通过本机 HTTP 路由 + 你自备的隧道对外提供；
-   - `catbox` 模式（需显式开启）：文件会被**上传到第三方图床 catbox.moe**，等于公开发布，请勿上传敏感内容。
-4. **日志**：运行日志写在 `~/.dsh/xiaoyi/xiaoyi.log`，可能包含会话 id、任务 id、文件路径、错误信息等。请自行注意日志的存放与分享。
-5. **HTTP 路由无鉴权**：`/xiaoyi/state` 与 `/xiaoyi/public/*` 不带身份校验。**不要**把 DSH 端口直接暴露到公网。
+Any **change, rate limit, charge, discontinuation or ban** by these services may break this plugin. **The author accepts no responsibility and is under no obligation to adapt.**
 
 ---
 
-## 六、合规与使用限制
+## 5. Data and privacy
 
-使用者承诺**不**将本项目用于：
+Understand the following data flows before use:
 
-- 违反中华人民共和国法律法规及使用者所在地法律法规的任何用途；
-- 违反华为云 / 小艺开放平台服务条款的任何用途；
-- 发送垃圾信息、骚扰、诈骗、钓鱼、批量营销或其他侵犯他人权益的行为；
-- 未经授权收集、存储、传播他人个人信息或隐私内容；
-- 绕过、破坏任何服务的安全机制或访问控制；
-- 任何危害网络安全、国家安全或公共利益的行为。
-
-因使用者的使用行为引发的**一切法律责任，由使用者自行承担**。
-
----
-
-## 七、责任限制
-
-在适用法律允许的最大范围内，**作者及任何贡献者不对**因本项目或与本项目相关的任何原因产生的**任何直接、间接、附带、特殊、惩罚性或后果性损害**承担责任，包括但不限于：
-
-利润损失、数据丢失、业务中断、设备损坏、账号封禁、第三方索赔、替代服务的采购成本。
-
-即使作者已被告知此类损害的可能性，本限制依然适用。
+1. **Inbound messages** — text sent from XiaoYi is delivered as a user message into **your local DSH session**. It therefore becomes part of your session records and may be sent to whichever model provider you have configured.
+2. **Inbound attachments** — attachments are **downloaded and stored on your machine** under `~/.dsh/xiaoyi/media/`, and the path is handed to the agent in the session. This plugin never cleans that directory automatically.
+3. **Outbound files** —
+   - `local` mode (default): the file is copied to `~/.dsh/xiaoyi/public/` and exposed through this plugin's own HTTP route plus a tunnel you provide;
+   - `catbox` mode (must be enabled explicitly): the file is **uploaded to the third-party host catbox.moe**, which amounts to publishing it. Do not upload anything sensitive.
+4. **Logs** — runtime logs are written to `~/.dsh/xiaoyi/xiaoyi.log` and may contain session ids, task ids, file paths and error messages. Take care where those logs end up.
+5. **The HTTP routes have no authentication** — `/xiaoyi/state` and `/xiaoyi/public/*` carry no identity check. Do **not** expose the DSH port directly to the internet.
 
 ---
 
-## 八、并非官方实现
+## 6. Compliance and acceptable use
 
-1. 本项目是**独立的第三方实现**，**不是**华为 / 小艺 / DeepSeek 的官方项目，也**未获得**其审核、认证或背书。
-2. 其中的协议实现是根据**公开文档与公开的参考实现**独立编写的，可能存在**理解偏差、字段遗漏或行为不一致**。请以官方文档为准。
-3. 文中出现的 **华为、小艺、DeepSeek、catbox** 等名称与商标，**归各自权利人所有**，本项目仅作说明性使用。
+You agree **not** to use this project for:
 
----
+- any purpose that violates the laws and regulations of the People's Republic of China or of your own jurisdiction;
+- any purpose that violates the terms of service of Huawei Cloud or the XiaoYi Open Platform;
+- spam, harassment, fraud, phishing, bulk marketing, or any other infringement of the rights of others;
+- collecting, storing or distributing other people's personal information or private content without authorisation;
+- circumventing or breaking any service's security mechanisms or access controls;
+- anything that endangers network security, national security or the public interest.
 
-## 九、其他
-
-- 作者可能随时**修改、暂停或删除**本项目，无需事先通知。
-- 本文档内容可能随项目更新而调整，以仓库中的最新版本为准。
-- 本免责声明若与 MIT 许可证正文存在冲突，**以 MIT 许可证为准**；本文档可视为对许可证中"无担保"与"责任限制"条款的进一步说明。
-
----
-
-# 致谢
-
-- **HangZhouXi**（<https://github.com/HangZhouXi>）—— 项目作者
-- **DeepSeek V4.1 Flash** —— 本项目在开发与调试过程中借助 DeepSeek V4.1 Flash 完成
-- **`@ynhcj/xiaoyi`（小艺官方插件）** —— 本项目的协议实现参考了其公开产物，特此致谢
-- **DSH（DeepSeek Harness）** —— 提供了插件宿主与生态
+**All legal responsibility arising from your use rests with you.**
 
 ---
 
-*最后更新：2026-10-08*
+## 7. Limitation of liability
+
+To the maximum extent permitted by applicable law, **the author and any contributor shall not be liable** for any direct, indirect, incidental, special, punitive or consequential damages arising out of or related to this project, including but not limited to:
+
+lost profits, lost data, business interruption, damaged equipment, banned accounts, third-party claims, or the cost of substitute services.
+
+This limitation applies even if the author has been advised of the possibility of such damages.
 
 ---
 
-## 第三方声明
+## 8. This is not an official implementation
 
-本项目在实现协议时，参考了 **`@ynhcj/xiaoyi`**（作者 **ynhcj**，**MIT 许可证**）的公开产物。
+1. This project is an **independent third-party implementation**. It is **not** an official Huawei, XiaoYi or DeepSeek project, and has **not** been reviewed, certified or endorsed by them.
+2. Its protocol implementation was written independently from **public documentation and publicly available reference artifacts**, and may contain **misunderstandings, missing fields or behavioural differences**. Official documentation takes precedence.
+3. Names and trademarks such as **Huawei, XiaoYi, DeepSeek and catbox** belong to their respective owners and are used here for descriptive purposes only.
 
-若本项目包含其任何受版权保护的代码片段，相关版权归其作者所有：
+---
+
+## 9. Miscellaneous
+
+- The author may **modify, suspend or delete** this project at any time without prior notice.
+- This document may be revised as the project evolves; the latest version in the repository governs.
+- If this disclaimer conflicts with the body of the MIT License, **the MIT License prevails**. This document may be read as a further explanation of the license's "no warranty" and "limitation of liability" clauses.
+- **The author is not a lawyer and this document is not legal advice.** For anything with real legal or commercial stakes, consult a qualified professional.
+
+---
+
+## Third-party notice
+
+When implementing the protocol, this project referred to the published artifacts of **`@ynhcj/xiaoyi`** (author **ynhcj**, **MIT License**).
+
+Should this project contain any copyrighted code fragment from it, the copyright belongs to its author:
 
 ```
 Copyright (c) ynhcj — MIT License
 ```
 
-该项目的许可证声明见其 `package.json` 的 `license` 字段。本项目同样以 MIT 许可证发布，二者兼容。
+That project declares its license in the `license` field of its `package.json`. This project is likewise released under the MIT License, and the two are compatible.
+
+---
+
+# Acknowledgements
+
+- **HangZhouXi** (<https://github.com/HangZhouXi>) — project author
+- **DeepSeek V4.1 Flash** — this project was developed and debugged with the help of DeepSeek V4.1 Flash
+- **`@ynhcj/xiaoyi` (official XiaoYi plugin)** — this project's protocol implementation referred to its published artifacts
+- **DSH (DeepSeek Harness)** — for providing the plugin host and ecosystem
+
+---
+
+*Last updated: 2026-10-10*

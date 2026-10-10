@@ -1,24 +1,24 @@
-// dsh-xiaoyi —— 小艺通道（把「小艺开放平台 · OpenClaw 模式」接入 DSH 宿主）
+// dsh-xiaoyi —— XiaoYi channel (wires the "XiaoYi open platform · OpenClaw mode" into the DSH host)
 //
-// 链路：手机小艺 →（华为云 wss 长连接）→ 本插件 → DSH 会话 → 回复按 A2A 帧发回小艺
+// Path: phone XiaoYi → (Huawei Cloud wss long connection) → this plugin → DSH session → reply sent back to XiaoYi as A2A frames
 //
-// 设计原则
-//  1) 只依赖 node 内置模块（含自研极简 WebSocket 客户端），不引第三方包：
-//     插件树里少一个包，就少一次「加载失败→整个宿主起不来」的风险。
-//  2) 所有 ctx.tools.register 都带 output{schema,render}（缺了会拖垮整棵插件树）。
-//  3) 任何连接动作都 try/catch 包住，绝不让 apply() 抛错。
+// Design principles
+//  1) Depend only on node built-in modules (including our own minimal WebSocket client), no third-party packages:
+//     one less package in the plugin tree is one less risk of "load failure → the whole host won't start".
+//  2) Every ctx.tools.register carries output{schema,render} (missing it takes down the entire plugin tree).
+//  3) Every connection action is wrapped in try/catch so apply() can never throw.
 //
-// 协议要点（照 @ynhcj/xiaoyi 0.0.8-beta 的 dist 逐行核对过）
-//   连接地址：wss://hag.cloud.huawei.com/openclaw/v1/ws/link
-//   鉴权请求头：x-access-key=AK / x-sign=Base64(HMAC-SHA256(SK, ts)) / x-ts=毫秒 / x-agent-id=agentId
-//   握手：{"msgType":"clawd_bot_init","agentId":"..."}
-//   心跳：每 30s {"msgType":"heartbeat","agentId":"...","timestamp":...}（同时发协议层 ping）
-//   入站：JSON-RPC 2.0，method="message/stream"，sessionId=params.sessionId，
-//         taskId=params.id，messageId=顶层 id，文本在 params.message.parts[kind=text].text
-//   出站：{"msgType":"agent_response", agentId, sessionId, taskId, msgDetail:"<JSON-RPC 字符串>"}
-//         msgDetail.result.kind = "status-update"（state=working，先回执）
-//                                 "artifact-update"（正文，lastChunk=true, final=true 收尾）
-//   控制：method="clearContext" / "tasks/cancel" / action="clear" → 回对应 JSON-RPC response
+// Protocol notes (verified line by line against the dist of @ynhcj/xiaoyi 0.0.8-beta)
+//   Connect URL: wss://hag.cloud.huawei.com/openclaw/v1/ws/link
+//   Auth headers: x-access-key=AK / x-sign=Base64(HMAC-SHA256(SK, ts)) / x-ts=milliseconds / x-agent-id=agentId
+//   Handshake: {"msgType":"clawd_bot_init","agentId":"..."}
+//   Heartbeat: every 30s {"msgType":"heartbeat","agentId":"...","timestamp":...} (also sends a protocol-level ping)
+//   Inbound: JSON-RPC 2.0, method="message/stream", sessionId=params.sessionId,
+//            taskId=params.id, messageId=top-level id, text lives in params.message.parts[kind=text].text
+//   Outbound: {"msgType":"agent_response", agentId, sessionId, taskId, msgDetail:"<JSON-RPC string>"}
+//             msgDetail.result.kind = "status-update" (state=working, the early ack)
+//                                     "artifact-update" (the body, lastChunk=true, final=true to finish)
+//   Control: method="clearContext" / "tasks/cancel" / action="clear" → answer with the matching JSON-RPC response
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -36,7 +36,7 @@ const STATE_FILE = join(STATE_DIR, 'state.json')
 const LOG_FILE = join(STATE_DIR, 'xiaoyi.log')
 const HEARTBEAT_MS = 30000
 
-// ── 小工具 ────────────────────────────────────────────────────────────────────
+// ── Small helpers ─────────────────────────────────────────────────────────────
 
 function log(...args) {
   const line = new Date().toISOString() + ' ' + args.map((a) => (typeof a === 'string' ? a : safeJson(a))).join(' ')
@@ -79,9 +79,9 @@ function saveState(state) {
   } catch (e) { log('saveState failed', e && e.message) }
 }
 
-// ── 极简 WebSocket 客户端（RFC6455 客户端侧，够用即止） ────────────────────────
+// ── Minimal WebSocket client (RFC6455 client side, just enough to get by) ─────
 //
-// 只做我们需要的：文本帧收发、ping/pong、close、分片重组（continuation）。
+// Only does what we need: text frame send/receive, ping/pong, close, fragment reassembly (continuation).
 
 class MiniWS {
   constructor(url, headers) {
@@ -92,8 +92,8 @@ class MiniWS {
     this.handshaken = false
     this.open = false
     this.closed = false
-    this.closeEmitted = false        // 保证 onclose 只发一次（error 与 close 会各来一次）
-    this.wsKey = ''                  // 握手用的 Sec-WebSocket-Key，用来校验 Accept
+    this.closeEmitted = false        // guarantees onclose fires only once (error and close each arrive separately)
+    this.wsKey = ''                  // the Sec-WebSocket-Key used for the handshake, kept to verify Accept
     this.fragOpcode = 0
     this.fragChunks = []
     this.onopen = null
@@ -163,7 +163,7 @@ class MiniWS {
   }
 
   _closed() {
-    if (this.closeEmitted) return      // 幂等：socket 的 error 与 close 会各来一次，只认第一次
+    if (this.closeEmitted) return      // idempotent: the socket's error and close each fire once, only the first counts
     this.closeEmitted = true
     const wasOpen = this.open
     this.open = false
@@ -209,8 +209,8 @@ class MiniWS {
       const headLines = head.split('\r\n')
       const status = headLines[0] || ''
       if (!/ 101\b/.test(status)) { this._fail(new Error('handshake failed: ' + status)); return }
-      // RFC6455 要求客户端校验 Sec-WebSocket-Accept = base64(SHA1(key + GUID))。
-      // 少了这一步，一个"长得像"的 HTTP 端点（或中间人）也能骗过握手。
+      // RFC6455 requires the client to verify Sec-WebSocket-Accept = base64(SHA1(key + GUID)): without
+      // that step an HTTP endpoint that merely "looks like" one (or a MITM) could fool the handshake.
       const hdrs = {}
       for (let i = 1; i < headLines.length; i++) {
         const j = headLines[i].indexOf(':')
@@ -225,7 +225,7 @@ class MiniWS {
       this.open = true
       if (this.onopen) { try { this.onopen() } catch (e) { log('onopen threw', e && e.message) } }
     }
-    // 帧解析
+    // frame parsing
     for (;;) {
       if (this.buf.length < 2) return
       const b0 = this.buf[0]
@@ -275,12 +275,12 @@ class MiniWS {
         if (opcode === 0x1 && this.onmessage) { try { this.onmessage(payload.toString('utf8')) } catch (e) { /* ignore */ } }
         continue
       }
-      // 其它 opcode 忽略
+      // any other opcode is ignored
     }
   }
 }
 
-// ── 小艺通道 ──────────────────────────────────────────────────────────────────
+// ── XiaoYi channel ────────────────────────────────────────────────────────────
 
 class XiaoYiChannel {
   constructor(opts) {
@@ -361,7 +361,7 @@ class XiaoYiChannel {
     }
     this.ws = ws
     ws.onopen = () => {
-      if (this.ws !== ws) return           // 旧连接的迟到事件，丢弃
+      if (this.ws !== ws) return           // late event from an old connection, discard it
       this.connected = true
       this.reconnectAttempts = 0
       this.lastError = ''
@@ -370,8 +370,8 @@ class XiaoYiChannel {
       this._send({ msgType: 'clawd_bot_init', agentId: this.agentId })
       this.heartbeatTimer = setInterval(() => {
         if (this.ws !== ws || !this.connected) return
-        // 心跳 + 活性判断：连着但长时间收不到任何回音（含 pong）→ 判定假死，主动重连。
-        // 交换机能骗过 TCP，骗不过"多久没听见对面说话"。
+        // Heartbeat + liveness: still connected but nothing heard back for a long time (pongs included)
+        // → treat it as a zombie and reconnect. A switch can fool TCP, but not "how long since we last heard back".
         const idle = Date.now() - (this.lastActivityAt || 0)
         if (idle > HEARTBEAT_MS * 3) {
           this.lastError = '连接假死 ' + Math.round(idle / 1000) + 's 没回音，主动重连'
@@ -384,7 +384,7 @@ class XiaoYiChannel {
       }, HEARTBEAT_MS)
     }
     ws.onmessage = (text) => {
-      if (this.ws !== ws) return           // 旧连接的消息，丢弃
+      if (this.ws !== ws) return           // message from an old connection, discard it
       this.lastActivityAt = Date.now()
       this._onMessage(text)
     }
@@ -395,7 +395,7 @@ class XiaoYiChannel {
       log('连接出错: ' + this.lastError)
     }
     ws.onclose = () => {
-      if (this.ws !== ws) return           // 已经不是当前连接了，别动状态、别触发重连
+      if (this.ws !== ws) return           // no longer the current connection: don't touch state, don't trigger a reconnect
       if (this.connected) log('与小艺的连接断开')
       this.connected = false
       this.ws = null
@@ -431,7 +431,7 @@ class XiaoYiChannel {
     if (msg.agentId && msg.agentId !== this.agentId) return
     this.lastMessageAt = Date.now()
 
-    // 控制类
+    // control messages
     if (msg.method === 'clearContext' || msg.method === 'clear_context' || msg.action === 'clear') {
       const sid = msg.sessionId || (msg.params && msg.params.sessionId) || ''
       this._sendJsonRpc(msg.id, { result: { status: { state: 'cleared' } } }, sid, msg.id)
@@ -446,7 +446,7 @@ class XiaoYiChannel {
       try { this.onCancel({ sessionId: sid, taskId, id: msg.id }) } catch (e) { /* ignore */ }
       return
     }
-    // A2A 对话请求
+    // A2A conversation request
     if (msg.jsonrpc === '2.0' && msg.method === 'message/stream' && msg.params && msg.params.message) {
       const sessionId = msg.params.sessionId || msg.sessionId || ''
       const taskId = msg.params.id || msg.id
@@ -457,7 +457,7 @@ class XiaoYiChannel {
       const fileParts = parts.filter((p) => p && p.kind === 'file')
       this.msgCount += 1
       log('收到小艺消息 session=' + sessionId + ' task=' + taskId + ' 文本长度=' + text.length + (fileParts.length ? ' 文件=' + fileParts.length : ''))
-      // 先回执：让端上知道活儿接了
+      // send the ack first: let the device side know the job has been accepted
       this.sendStatus(sessionId, taskId, messageId, '任务正在处理中，请稍后~', 'working', false)
       try {
         this.onRequest({ sessionId, taskId, messageId, text, parts, fileParts })
@@ -504,7 +504,7 @@ class XiaoYiChannel {
     }, sessionId, taskId)
   }
 
-  // 出站"在线文件/图片"：Part 扩展 { url, filename, mediaType }（华为《Part结构定义》）
+  // Outbound "online file/image": Part extension { url, filename, mediaType } (Huawei "Part structure definition")
   sendArtifactWithFiles(sessionId, taskId, messageId, caption, files, final) {
     const parts = []
     if (caption) parts.push({ kind: 'text', text: String(caption) })
@@ -522,12 +522,12 @@ class XiaoYiChannel {
   }
 }
 
-// ── 入站附件下载（小艺 → 我） ─────────────────────────────────────────────────
+// ── Inbound attachment download (XiaoYi → us) ────────────────────────────────
 //
-// A2A 入站的 file part 形状（华为《消息流》文档 + 参照实现一致）：
+// Shape of an inbound A2A file part (per Huawei's "message stream" doc, matching the reference implementation):
 //   { kind: 'file', file: { name, mimeType, uri } }
-// 处理办法：把 uri 抓下来存到 ~/.dsh/xiaoyi/media/，把本地路径连同说明塞进会话文本，
-// 这样会话里的 agent 可以直接 read_image / read。
+// Approach: fetch the uri and store it under ~/.dsh/xiaoyi/media/, then put the local path plus a
+// note into the session text, so the agent inside the session can read_image / read it directly.
 
 function safeFileName(name) {
   const base = String(name || ('file-' + Date.now())).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/^\.+/, '')
@@ -543,13 +543,13 @@ const MIME_EXT = {
   'video/mp4': '.mp4',
 }
 
-// ── 入站 URI 的安全闸门（SSRF 防护） ─────────────────────────────────────────
+// ── Security gate for inbound URIs (SSRF protection) ─────────────────────────
 //
-// 入站 file part 的 uri 来自**外部消息**，属于不可信输入，不能直接抓：
-//   1) 只允许 http/https（挡掉 file:、data: 等协议）
-//   2) 挡掉环回 / 私网 / 链路本地地址 —— 否则可以拿它当跳板探测内网，
-//      甚至读到云环境的元数据服务（169.254.169.254）
-//   3) 重定向之后要再查一遍：公网地址 302 到 127.0.0.1 是最常见的绕过手法
+// The uri of an inbound file part comes from **external messages** — untrusted input — so it can't be fetched blindly:
+//   1) Only http/https is allowed (blocks file:, data: and friends)
+//   2) Loopback / private / link-local addresses are blocked — otherwise it could be used as a springboard
+//      to probe the intranet, or even to read a cloud environment's metadata service (169.254.169.254)
+//   3) After a redirect, check again: a public address 302-ing to 127.0.0.1 is the most common bypass trick
 
 function isPrivateIp(ip) {
   const v = String(ip || '')
@@ -558,9 +558,9 @@ function isPrivateIp(ip) {
     if (p[0] === 0 || p[0] === 10 || p[0] === 127) return true
     if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true
     if (p[0] === 192 && p[1] === 168) return true
-    if (p[0] === 169 && p[1] === 254) return true                 // 链路本地（云元数据）
-    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true    // 运营商 CGNAT
-    if (p[0] >= 224) return true                                  // 组播 / 保留段
+    if (p[0] === 169 && p[1] === 254) return true                 // link-local (cloud metadata)
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true    // carrier-grade CGNAT
+    if (p[0] >= 224) return true                                  // multicast / reserved ranges
     return false
   }
   if (net.isIPv6(v)) {
@@ -583,7 +583,7 @@ function checkInboundUri(uri) {
   return ''
 }
 
-// 流式读取并卡上限：只信 content-length 会被"少报体积"的响应把内存打爆
+// Stream the body under a hard cap: trusting content-length alone lets an under-reporting response blow up memory
 async function readBodyCapped(res, max) {
   const tooBig = (n) => new Error('文件太大：' + (n / 1048576).toFixed(1) + ' MB（上限 ' + (max / 1048576) + ' MB）')
   if (!res.body || typeof res.body.getReader !== 'function') {
@@ -631,10 +631,10 @@ async function downloadInboundFiles(fileParts) {
         res = await fetch(uri, { signal: ctl.signal, headers: { 'User-Agent': 'dsh-xiaoyi/0.1' } })
       } finally { clearTimeout(timer) }
       if (!res.ok) throw new Error('HTTP ' + res.status)
-      // 重定向之后落点要再查一遍：公网链接 302 到 127.0.0.1 是典型的绕过手法
+      // re-check where we landed after redirects: a public link 302-ing to 127.0.0.1 is a classic bypass
       const landed = checkInboundUri(res.url || uri)
       if (landed) throw new Error('重定向到不可信地址：' + landed)
-      // 体积闸门：别让一个大附件把磁盘塞满（默认 50 MB 上限）
+      // size gate: don't let one huge attachment fill up the disk (50 MB cap by default)
       const MAX_INBOUND = 50 * 1024 * 1024
       const declared = Number(res.headers.get('content-length') || 0)
       if (declared && declared > MAX_INBOUND) {
@@ -653,14 +653,14 @@ async function downloadInboundFiles(fileParts) {
   return out
 }
 
-// ── 出站"在线文件/图片"的发布（我 → 小艺） ──────────────────────────────────
+// ── Publishing outbound "online file/image" (us → XiaoYi) ────────────────────
 //
-// 协议要求回给端侧的文件必须是**公网 https 地址**（Part 扩展：url + filename + mediaType）。
-// 三种发布方式：
-//   local  —— 复制到 ~/.dsh/xiaoyi/public/，用插件自己的 HTTP 路由对外提供，
-//             再配合一条隧道（如 localhost.run）把 state.publicBaseUrl 指过来：文件不出门
-//   catbox —— 上传到 catbox.moe（第三方图床，一条命令拿到 https 链接）
-//   none   —— 不发布，直接报错说明
+// The protocol requires files sent back to the device side to be **public https URLs**
+// (Part extension: url + filename + mediaType). Three publishing modes:
+//   local  —— copy into ~/.dsh/xiaoyi/public/, serve via the plugin's own HTTP route, and pair it with a
+//             tunnel (e.g. localhost.run) pointed at by state.publicBaseUrl: the file never leaves the box
+//   catbox —— upload to catbox.moe (third-party image host; one request gets an https link)
+//   none   —— don't publish, just fail with a clear error
 
 const EXT_MIME = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
@@ -681,7 +681,7 @@ function publicDir() {
 
 function copyToPublic(filePath) {
   const name = safeFileName(require$basename(filePath))
-  // 公开链接必须不可猜：只用时间戳的话，别人按时间枚举就能把发出去的文件全捞走
+  // a public link must be unguessable: with a bare timestamp, anyone could enumerate by time and sweep up every file sent
   const dest = join(publicDir(), Date.now().toString(36) + '-' + randomBytes(8).toString('hex') + '-' + name)
   writeFileSync(dest, readFileSync(filePath))
   return { dest, name, mediaType: mimeOfName(name) }
@@ -705,7 +705,7 @@ function require$basename(p) {
   return i >= 0 ? s.slice(i + 1) : s
 }
 
-// ── 回复文本提取（只取可见正文，跳过 reasoning） ───────────────────────────────
+// ── Reply text extraction (visible body only, skipping reasoning) ─────────────
 
 function extractReplyText(msg) {
   if (!msg) return ''
@@ -736,10 +736,10 @@ function hasToolCalls(msg) {
   return false
 }
 
-// 供离线自测脚本使用（不参与插件加载）
+// Used by the offline self-test scripts (not part of plugin loading)
 export { MiniWS, XiaoYiChannel, extractReplyText, hasToolCalls, checkInboundUri, isPrivateIp }
 
-// ── 插件主体 ──────────────────────────────────────────────────────────────────
+// ── Plugin body ──────────────────────────────────────────────────────────────
 
 export function apply(ctx) {
   const state = loadState()
@@ -747,9 +747,9 @@ export function apply(ctx) {
   if (!state.wsUrl) state.wsUrl = DEFAULT_WS_URL
 
   let listenHandle = null
-  let listenPromise = null    // 正在进行的会话初始化（并发共用，避免误判"未就绪"）
-  let pending = []            // 待回复的小艺请求队列（FIFO）：回复永远对着队首
-  let currentReply = ''       // 本回合最近一段正文
+  let listenPromise = null    // session initialisation currently in flight (shared by concurrent callers, avoids a false "not ready")
+  let pending = []            // queue of XiaoYi requests awaiting a reply (FIFO): the reply always targets the head
+  let currentReply = ''       // most recent chunk of body text in this turn
 
   const channel = new XiaoYiChannel({
     ak: state.ak,
@@ -767,7 +767,7 @@ export function apply(ctx) {
             pending = pending.filter((p) => p !== req)
             return
           }
-          // 入站附件：先抓到本地，再把路径交给会话里的 agent
+          // Inbound attachments: fetch them locally first, then hand the paths to the agent in the session
           let files = []
           if (req.fileParts && req.fileParts.length) {
             log('入站 parts 原文：' + safeJson(req.parts).slice(0, 1200))
@@ -785,12 +785,12 @@ export function apply(ctx) {
               text += '\n\n以下附件没抓下来：\n' + badList.map((f) => '- ' + f.name + '（' + f.error + '）').join('\n')
             }
           }
-          // 注意：这里**不**动 currentReply / 不认领 active——
-          // 多条消息可能排队进来，回复一律认队首（finishTurn 里 shift），
-          // 否则第二条会把第一条的正文顶掉、还把回帧挂到错的 taskId 上。
+          // Note: this deliberately does **not** touch currentReply and does not claim "active"—— several messages
+          // may queue up, and replies always go to the head (shift in finishTurn); otherwise the second one would
+          // clobber the first one's body and attach the reply frame to the wrong taskId.
           //
-          // 必须兜住 followup 的失败：Node 默认把「未处理的 Promise 拒绝」当致命错误，
-          // 一个没接住的拒绝能直接把宿主进程带走。失败时也要回帧 + 出队，别让任务卡死在队列里。
+          // We must also catch failures of followup: Node treats an "unhandled promise rejection" as fatal by default,
+          // and one uncaught rejection can take the whole host process down — so still reply and dequeue on failure.
           const followed = h.agent.followup({
             id: 'xy-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
             role: 'user',
@@ -810,7 +810,7 @@ export function apply(ctx) {
       })()
     },
     onCancel: (info) => {
-      // 端侧按了"停止"：把这条任务从待回复队列里摘掉，免得之后把回复发到已取消的任务上
+      // the device side hit "stop": drop this task from the reply queue so we don't later reply to a cancelled task
       const before = pending.length
       pending = pending.filter((p) => !(p.taskId === info.taskId || p.messageId === info.taskId || p.taskId === info.id))
       if (pending.length !== before) log('已从待回复队列移除被取消的任务（剩 ' + pending.length + ' 条）')
@@ -818,15 +818,15 @@ export function apply(ctx) {
     },
   })
 
-  // ── DSH 会话（冷启动复用同一条，不重复新开对话） ──────────────────────
+  // ── DSH session (reuse the same one across cold starts, never open a duplicate conversation) ──
 
   function findLatestListenSessionId() {
     try {
       const root = join(homedir(), '.dsh', 'sessions')
-      // 只认工作目录正确的那一档（DSH 用 `--C-Users-Alice-Desktop--` 这种目录名编码 cwd）
+      // Only accept the bucket whose cwd is right (DSH encodes cwd in dir names like `--C-Users-Alice-Desktop--`)
       const wantCwd = String(state.cwd || join(homedir(), 'Desktop'))
-      // DSH 的工作区目录名编码规则：去掉盘符冒号，`\` 与 `/` 换成 `-`。
-      // 例：C:\Users\Alice\Desktop → --C-Users-Alice-Desktop--
+      // DSH's workspace directory naming rule: drop the drive-letter colon, turn `\` and `/` into `-`.
+      // Example: C:\Users\Alice\Desktop → --C-Users-Alice-Desktop--
       const wantTag = '--' + wantCwd.replace(/:/g, '').replace(/[\\/]/g, '-') + '--'
       let best = ''
       let bestTime = 0
@@ -836,14 +836,14 @@ export function apply(ctx) {
         try { entries = readdirSync(join(root, ws)) } catch (e) { continue }
         for (const nm of entries) {
           if (nm.indexOf('xiaoyi-listen-') !== 0) continue
-          // 会话文件格式会随宿主升级换代（v3 → v4）。只认死一个版本名，
-          // 升级过的会话就会"看不见"，冷启动于是每次都新开一条对话。
+          // The session file format changes across host upgrades (v3 → v4). Pinning a single version
+          // name would make upgraded sessions "invisible", so every cold start would open a new conversation.
           let mtime = 0
           for (const fname of ['session.v4.jsonl.zstd', 'session.v3.jsonl.zstd']) {
             try {
               const st = statSync(join(root, ws, nm, fname))
               if (st.mtimeMs > mtime) mtime = st.mtimeMs
-            } catch (e) { /* 该版本文件不存在，试下一个 */ }
+            } catch (e) { /* this version's file doesn't exist, try the next one */ }
           }
           if (mtime > bestTime) { bestTime = mtime; best = nm }
         }
@@ -871,7 +871,7 @@ export function apply(ctx) {
           if (presetId) setup = async (agentCtx) => { await presets.mount(agentCtx, presetId) }
         } catch (e) { /* ignore */ }
       }
-      // 先尝试 resume：优先用状态里记住的那条会话，尽量不重复新开对话
+      // Try resume first: prefer the session remembered in state, so we open as few new conversations as possible
       async function tryResume(id) {
         if (!id || typeof agents.resume !== 'function') return null
         if (typeof agents.get === 'function') {
@@ -910,8 +910,8 @@ export function apply(ctx) {
         return handle
       }
       const sessionId = 'xiaoyi-listen-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
-      // 工作目录必须是可写的：宿主可能从 系统目录 启动，
-      // 那样会话沙箱（workspace-write）连临时文件都建不了，会话里啥也干不成。
+      // The working directory must be writable: if the host was started from a system directory, the session
+      // sandbox (workspace-write) cannot even create temp files, leaving the session unable to do anything.
       const cwd = String(state.cwd || join(homedir(), 'Desktop'))
       const opts = { sessionId, meta: { cwd }, agentOptions: { provider: model.provider, model: model.model } }
       if (setup) opts.setup = setup
@@ -930,8 +930,8 @@ export function apply(ctx) {
     }
   }
 
-  // 并发保护：多条小艺消息可能几乎同时到达。老写法里第二条一看到"正在初始化"就直接返回 null，
-  // 用户会收到「DSH 会话未就绪」这种**假故障**。改成复用同一个进行中的 Promise。
+  // Concurrency guard: several XiaoYi messages may arrive at once. The old code returned null as soon as
+  // the second one saw "initialising", so users got a **false failure** ("DSH session not ready"). Now the Promise is shared.
   function ensureListen() {
     if (listenHandle) return Promise.resolve(listenHandle)
     if (listenPromise) return listenPromise
@@ -942,10 +942,10 @@ export function apply(ctx) {
     return p
   }
 
-  // ── 回复回传小艺 ──────────────────────────────────────────────────────────
+  // ── Send the reply back to XiaoYi ────────────────────────────────────────────
 
   function finishTurn(reason) {
-    // 回复永远对着队首：DSH 会话里的回合是一条条排队的，谁先问谁先答。
+    // Replies always target the queue head: turns in a DSH session are queued one by one, first asked first answered.
     const req = pending[0]
     const text = currentReply
     if (!req) { currentReply = ''; return }
@@ -953,7 +953,7 @@ export function apply(ctx) {
     pending.shift()
     const out = String(text || '').trim()
     if (!out) { log('本回合没有可见正文（' + reason + '），不回帧'); return }
-    // 照参照实现：先发一条"已完成"状态帧，再发正文的 artifact-update（final=true 收尾）
+    // As in the reference implementation: send a "completed" status frame first, then the artifact-update body (final=true)
     channel.sendStatus(req.sessionId, req.taskId, req.messageId, '任务处理已完成~', 'completed', false)
     channel.sendArtifact(req.sessionId, req.taskId, req.messageId, out, true)
     log('已回小艺（' + reason + '）长度=' + out.length + '，队列剩 ' + pending.length)
@@ -979,7 +979,7 @@ export function apply(ctx) {
     } catch (e) { /* ignore */ }
   })
 
-  // ── agent 工具（每个都必须带 output，否则整棵插件树加载失败） ──────────────
+  // ── agent tools (each one must carry output, otherwise the whole plugin tree fails to load) ──
 
   const outSchema = {
     schema: { type: 'object', additionalProperties: true },
@@ -1048,7 +1048,7 @@ export function apply(ctx) {
     },
   }))
 
-  // 出站图片/文件：把本地文件变成公网 https 链接再回给小艺
+  // Outbound images/files: turn a local file into a public https link and send it back to XiaoYi
   const pubRoutes = new Set()
   function registerPublicRoute(name) {
     if (pubRoutes.has(name)) return
@@ -1089,9 +1089,9 @@ export function apply(ctx) {
       if (!filePath || !existsSync(filePath)) return { ok: false, error: '文件不存在：' + filePath }
       const req = pending[0]
       if (!req) return { ok: false, error: '当前没有进行中的小艺会话（得先在小艺里说句话）' }
-      // 隐私优先：默认只走本机（文件不出门）。要传第三方图床必须**显式**开启
-      // （调用时传 mode="catbox"，或在 state.json 里写 "imageHost": "catbox"）。
-      // 老版本会在没配隧道时静默回退到 catbox，用户根本不知道自己的文件被传了出去。
+      // Privacy first: default to local-only (the file never leaves this machine). Uploading to a third-party
+      // image host must be enabled **explicitly** (pass mode="catbox", or set "imageHost": "catbox" in state.json).
+      // Older versions silently fell back to catbox with no tunnel, and the user never knew their file was uploaded.
       const mode = String(a.mode || state.imageHost || 'local')
       let file = null
       try {
@@ -1128,7 +1128,7 @@ export function apply(ctx) {
     },
   }))
 
-  // ── HTTP 路由（给浏览器/脚本看状态） ──────────────────────────────────────
+  // ── HTTP routes (for browsers/scripts to read status) ────────────────────────
 
   function sendJson(res, status, obj) {
     try {
@@ -1163,7 +1163,7 @@ export function apply(ctx) {
     sendJson(res, 200, { ok: true, status: channel.status() })
   })
 
-  // ── 启动/收尾 ─────────────────────────────────────────────────────────────
+  // ── Startup / teardown ───────────────────────────────────────────────────────
 
   ctx.effect(() => {
     if (state.enabled && channel.ready()) {

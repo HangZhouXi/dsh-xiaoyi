@@ -1,74 +1,75 @@
 # dsh-xiaoyi
 
-把「**小艺开放平台 · OpenClaw 模式**」的通道实现成 **DSH 插件**：手机上的小艺（语音/文字/图片）直接对话到你本机运行的 DSH 会话。
+**English** | [简体中文](./README.zh-CN.md)
 
-> **这不是一个独立的聊天机器人。** 它只是"入口"，小艺连进来的是你本机那套 DSH 会话（同一套工具、同一份工作目录）。没有第二个 agent。
+A **DSH (DeepSeek Harness) host plugin** that connects **Huawei XiaoYi in OpenClaw mode** to your local DSH session — voice, text and images from your phone reach the agent running on your own machine.
+
+> **This is not a standalone chatbot.** XiaoYi is only the entry point; what it connects to is your local DSH session (same tools, same working directory). There is no second agent.
 
 ```
-手机小艺（在哪都行）
-   │  语音 / 文字 / 图片
+Huawei XiaoYi on your phone  (anywhere)
+   │  voice / text / images
    ▼
-华为云  wss://hag.cloud.huawei.com/openclaw/v1/ws/link
-   │  长连接（AK/SK 鉴权 + 30 秒心跳）
+Huawei Cloud  wss://hag.cloud.huawei.com/openclaw/v1/ws/link
+   │  long-lived connection (AK/SK auth + 30s heartbeat)
    ▼
-本插件（跑在 DSH 宿主进程里）
+This plugin  (runs inside the DSH host process)
    │
    ▼
-DSH 会话  xiaoyi-listen-*
+DSH session  xiaoyi-listen-*
 ```
 
 ---
 
-## 前置条件（先看完再装）
+## Prerequisites
 
-这个东西**不是开箱即用的**，装之前请确认三件事：
+This is **not** plug-and-play. Before installing, make sure you have all three:
 
-| # | 条件 | 说明 |
+| # | Requirement | Notes |
 | --- | --- | --- |
-| 1 | **你有一个 DSH 宿主** | DSH = DeepSeek Harness。本插件是宿主侧插件，没有宿主它跑不起来 |
-| 2 | **你有小艺开放平台的 OpenClaw 模式凭证** | 需要 `AK` / `SK` / `agentId` 三样。这是华为云侧的开发者凭证，需要你自己去小艺开放平台申请开通 |
-| 3 | **Node.js ≥ 20** | 代码用了内置的 `fetch` / `FormData` / `Blob`。开发环境是 Node 24 |
+| 1 | **A DSH host** | DSH = DeepSeek Harness. This is a host-side plugin; without a host it cannot run. |
+| 2 | **XiaoYi Open Platform credentials (OpenClaw mode)** | You need `AK` / `SK` / `agentId`. These are Huawei Cloud developer credentials you must apply for yourself on the XiaoYi Open Platform. |
+| 3 | **Node.js ≥ 20** | The code uses the built-in `fetch` / `FormData` / `Blob`. Developed on Node 24. |
 
-> 如果你拿不到第 2 项，也可以把这个仓库当成**协议实现参考**来读——`index.js` 里把 OpenClaw 的握手、鉴权、心跳、JSON-RPC 收发都写全了。
-
----
-
-## 特性
-
-- **零第三方依赖**：只用 Node 内置模块，**自己手写了 WebSocket 客户端**（RFC6455 客户端侧：文本帧、分片重组、ping/pong、握手校验）。
-  插件树里少一个包，就少一次「某个包加载失败 → 整个宿主起不来」的风险。
-- **完整协议实现**：鉴权签名、初始化握手、心跳与假死检测、JSON-RPC 2.0 流式收发、控制类消息（clearContext / tasks/cancel）。
-- **入站附件自动落地**：小艺发来的图片/文件自动下载到本地，再把路径交给会话里的 agent（可直接 `read_image` / `read`）。
-- **出站在线文件**：把本地文件发回小艺（协议只接受公网 https URL，支持本机隧道或第三方图床两种方式）。
-- **会话复用**：冷启动优先 resume 原来那条会话，不重复新开对话。
+> If you cannot obtain item 2, you can still read this repository as a **protocol reference implementation** — `index.js` implements the XiaoYi/OpenClaw handshake, auth, heartbeat and JSON-RPC message exchange in full.
 
 ---
 
-## 安装
+## Features
 
-### 1. 放置源码
+- **Zero third-party dependencies.** Only Node built-ins are used, including a **hand-written minimal WebSocket client** (RFC6455 client side: text frames, fragmentation reassembly, ping/pong, and handshake verification). Fewer packages in the plugin tree means fewer chances that one failed package takes the whole host down.
+- **Complete protocol implementation.** Auth signing, init handshake, heartbeat with stale-connection detection, JSON-RPC 2.0 streaming, and control messages (`clearContext` / `tasks/cancel`).
+- **Inbound attachments.** Images and files sent from XiaoYi are downloaded to disk, and their local paths are handed to the agent in the session (ready for `read_image` / `read`).
+- **Outbound online files.** Send local files back to XiaoYi (the protocol only accepts public https URLs; supports a local tunnel or a third-party image host).
+- **Session reuse.** On a cold start the plugin resumes the existing session instead of opening a new conversation every time.
 
-把本目录放到任意位置，推荐和其他插件放一起：
+---
+
+## Installation
+
+### 1. Place the source
+
+Put this directory anywhere you keep plugins. The conventional location is:
 
 ```
 ~/.dsh/plugin-sources/dsh-xiaoyi
 ```
 
-### 2. 注册到 profile
+### 2. Register it in your profile
 
-**方式 A（推荐，一条命令）：**
+**Option A (recommended, one command):**
 
 ```bash
-# 从 GitHub 仓库装
+# install from the GitHub repository
 dsh plugin --profile web add git+https://github.com/HangZhouXi/dsh-xiaoyi
 
-# 或从 npm 装（发布到 npm 之后）
+# or from npm (after it is published there)
 dsh plugin --profile web add dsh-xiaoyi
 ```
 
-**方式 B（手动编辑）：**
+**Option B (edit by hand):**
 
-编辑 `~/.dsh/profiles/web/package.json`：
+Edit `~/.dsh/profiles/web/package.json`:
 
 ```jsonc
 {
@@ -76,144 +77,156 @@ dsh plugin --profile web add dsh-xiaoyi
     "profile": {
       "bundles": [
         // ...
-        "dsh-xiaoyi"          // ← 加进 bundles
+        "dsh-xiaoyi"          // ← add to bundles
       ]
     }
   },
   "dependencies": {
     // ...
-    "dsh-xiaoyi": "git+file:///C:/Users/<你>/.dsh/plugin-sources/dsh-xiaoyi"
+    "dsh-xiaoyi": "git+file:///C:/Users/<you>/.dsh/plugin-sources/dsh-xiaoyi"
   }
 }
 ```
 
-> 也可以直接用本地路径依赖：`"dsh-xiaoyi": "file:../../plugin-sources/dsh-xiaoyi"`。
+> A plain local path dependency also works: `"dsh-xiaoyi": "file:../../plugin-sources/dsh-xiaoyi"`.
 
-### 3. 安装并冷启动
+### 3. Install and cold-start
 
 ```bash
 dsh plugin --profile web install
 ```
 
-然后**冷启动 DSH 宿主**（不是热重载 —— 宿主端插件必须冷启动才生效）。
+Then **cold-start the DSH host**. (Host-side plugins are not applied by hot reload — a cold start is required.)
 
-### 4. 填凭证
+### 4. Provide credentials
 
-编辑 `~/.dsh/xiaoyi/state.json`：
+Edit `~/.dsh/xiaoyi/state.json`:
 
 ```json
 {
   "enabled": true,
-  "ak": "小艺开放平台凭证 AK",
-  "sk": "小艺开放平台凭证 SK",
-  "agentId": "OpenClaw 模式智能体的 agentId",
+  "ak": "XiaoYi Open Platform AK",
+  "sk": "XiaoYi Open Platform SK",
+  "agentId": "agentId of your OpenClaw-mode agent",
   "wsUrl": "wss://hag.cloud.huawei.com/openclaw/v1/ws/link",
   "sessionId": "",
-  "cwd": "C:\\Users\\<你>\\Desktop"
+  "cwd": "C:\\Users\\<you>\\Desktop",
+  "publicBaseUrl": "",
+  "imageHost": ""
 }
 ```
 
-或者启动后让会话里的 agent 调工具 `xiaoyi_set` 直接改（改完立即生效，会重连）。
+| Field | Purpose |
+| --- | --- |
+| `enabled` | Master switch. `false` disconnects the channel. |
+| `ak` / `sk` / `agentId` | XiaoYi Open Platform credentials. All three are required. |
+| `wsUrl` | WebSocket endpoint. Leave as the default unless Huawei changes it. |
+| `sessionId` | The DSH session to reuse. Normally written by the plugin itself. |
+| `cwd` | Working directory for the session. Must be writable. |
+| `publicBaseUrl` | Only for outbound files in `local` mode: the public https base URL of your tunnel. |
+| `imageHost` | Optional default publisher for outbound files. Set `"catbox"` to make catbox.moe the default; leave empty to stay local-only. |
 
-日志：`~/.dsh/xiaoyi/xiaoyi.log`
+You can also let the agent configure these at runtime with the `xiaoyi_set` tool (changes take effect immediately and reconnect).
+
+Log file: `~/.dsh/xiaoyi/xiaoyi.log`
 
 ---
 
-## 提供给 agent 的工具
+## Agent tools
 
-| 工具 | 作用 |
+| Tool | Purpose |
 | --- | --- |
-| `xiaoyi_status` | 通道状态：凭证齐不齐、WebSocket 连没连上、监听会话 id、队列长度、最后错误、消息计数 |
-| `xiaoyi_set` | 改凭证 / 开关（`ak`、`sk`、`agentId`、`wsUrl`、`enabled`），立即作用于活的连接 |
-| `xiaoyi_send` | 主动往当前小艺会话推一句短消息（适合长任务收尾提醒） |
-| `xiaoyi_send_photo` | 把本地图片/文件发给小艺（协议只收公网 https，见下方「出站文件」） |
-| `xiaoyi_reconnect` | 强制断开重连（改完凭证、或连接发僵时用） |
+| `xiaoyi_status` | Channel status: whether credentials are complete, whether the WebSocket is connected, the listening session id, queue length, last error, message counters. |
+| `xiaoyi_set` | Update credentials / switch (`ak`, `sk`, `agentId`, `wsUrl`, `enabled`). Takes effect immediately on the live connection. |
+| `xiaoyi_send` | Push a short message to the current XiaoYi conversation (useful as a long-task completion notice). |
+| `xiaoyi_send_photo` | Send a local image or file to XiaoYi (the protocol only accepts public https; see "Outbound files" below). |
+| `xiaoyi_reconnect` | Force a disconnect and reconnect (after changing credentials, or when the link looks stale). |
 
-## HTTP 路由
+## HTTP routes
 
-| 路径 | 作用 |
+| Path | Purpose |
 | --- | --- |
-| `GET /xiaoyi/state` | JSON 状态 |
-| `GET /xiaoyi/connect` | 启动通道（并确保监听会话就绪） |
-| `GET /xiaoyi/disconnect` | 断开通道 |
-| `GET /xiaoyi/public/<文件名>` | 出站文件的本机对外通道（文件名含随机串，不可猜） |
+| `GET /xiaoyi/state` | JSON status. |
+| `GET /xiaoyi/connect` | Start the channel and make sure the listening session is ready. |
+| `GET /xiaoyi/disconnect` | Stop the channel. |
+| `GET /xiaoyi/public/<filename>` | Serves published outbound files. Filenames carry a random component and are not guessable. |
 
 ---
 
-## 协议要点
+## Protocol summary
 
-> 照 `@ynhcj/xiaoyi` 的 dist 逐行核对过，实现上不依赖该包。
+> Verified against the published artifacts of `@ynhcj/xiaoyi`. This project does not depend on that package.
 
-| 环节 | 内容 |
+| Stage | Detail |
 | --- | --- |
-| 连接 | `wss://hag.cloud.huawei.com/openclaw/v1/ws/link` |
-| 鉴权请求头 | `x-access-key`=AK、`x-sign`=`Base64(HMAC-SHA256(SK, ts))`、`x-ts`=毫秒、`x-agent-id`=agentId |
-| 握手 | `{"msgType":"clawd_bot_init","agentId":"..."}` |
-| 心跳 | 每 30s `{"msgType":"heartbeat","agentId":"...","timestamp":...}` + 协议层 ping |
-| 入站 | JSON-RPC 2.0，`method="message/stream"`；`sessionId=params.sessionId`、`taskId=params.id`、`messageId`=顶层 `id`；文本在 `params.message.parts[kind=text].text`，附件在 `parts[kind=file].file{name,mimeType,uri}` |
-| 出站 | `{"msgType":"agent_response", agentId, sessionId, taskId, msgDetail:"<JSON-RPC 字符串>"}` |
-| 出站帧类型 | `result.kind="status-update"`（先回执 `state=working`）、`result.kind="artifact-update"`（正文，`lastChunk=true, final=true` 收尾） |
-| 控制 | `clearContext` / `tasks/cancel` / `action="clear"` → 回对应 JSON-RPC response |
+| Endpoint | `wss://hag.cloud.huawei.com/openclaw/v1/ws/link` |
+| Auth headers | `x-access-key`=AK, `x-sign`=`Base64(HMAC-SHA256(SK, ts))`, `x-ts`=milliseconds, `x-agent-id`=agentId |
+| Handshake | `{"msgType":"clawd_bot_init","agentId":"..."}` |
+| Heartbeat | Every 30s `{"msgType":"heartbeat","agentId":"...","timestamp":...}` plus a protocol-level ping |
+| Inbound | JSON-RPC 2.0, `method="message/stream"`; `sessionId=params.sessionId`, `taskId=params.id`, `messageId`=top-level `id`; text in `params.message.parts[kind=text].text`, attachments in `parts[kind=file].file{name,mimeType,uri}` |
+| Outbound | `{"msgType":"agent_response", agentId, sessionId, taskId, msgDetail:"<JSON-RPC string>"}` |
+| Outbound frame kinds | `result.kind="status-update"` (acknowledge with `state=working`), `result.kind="artifact-update"` (the body, closed with `lastChunk=true, final=true`) |
+| Control | `clearContext` / `tasks/cancel` / `action="clear"` → reply with the matching JSON-RPC response |
 
-### 出站文件（`xiaoyi_send_photo`）
+### Outbound files (`xiaoyi_send_photo`)
 
-协议回给端侧的 Part 是 `{ url, filename, mediaType }` —— **只接受公网 https 地址，没有"上传字节"的接口**。所以有两种模式：
+The Part sent back to the client is `{ url, filename, mediaType }` — **only public https URLs are accepted; there is no "upload bytes" interface**. Hence two modes:
 
-| mode | 行为 | 隐私 |
+| mode | Behaviour | Privacy |
 | --- | --- | --- |
-| `local`（**默认**） | 复制到 `~/.dsh/xiaoyi/public/`，由本插件自己的路由对外提供，再配合一条隧道（如 `localhost.run`）把 `state.publicBaseUrl` 指过来 | 文件不出本机（除了隧道） |
-| `catbox` | 上传到第三方图床 `catbox.moe` | **文件会被传到第三方**，必须显式指定才启用 |
+| `local` (**default**) | The file is copied to `~/.dsh/xiaoyi/public/` and served by this plugin's own route; pair it with a tunnel (e.g. `localhost.run`) and point `state.publicBaseUrl` at it. | The file never leaves your machine (except through your tunnel). |
+| `catbox` | Uploads to the third-party host `catbox.moe`. | **The file is sent to a third party.** Must be requested explicitly. |
 
-配 `state.publicBaseUrl` 之后 `local` 模式才能用；没配就直接报错，**不会**偷偷回退到图床。
-
----
-
-## 安全与隐私
-
-- **凭证只存在本地** `~/.dsh/xiaoyi/state.json`，已被 `.gitignore` 排除，不进仓库、不进日志（日志只记录"有/无"）。
-- **入站附件有 SSRF 防护**：入站 `uri` 来自外部消息，属于不可信输入。插件只允许 `http/https`，拒绝环回/私网/链路本地地址（含 `169.254.169.254` 这类云元数据地址），**重定向之后会再检查一次落点**。
-- **附件有体积闸门**：单文件上限 50 MB，流式读取，对方少报 `content-length` 也不会把内存打爆。
-- **出站公开链接不可猜**：文件名带 8 字节随机串。
-- ⚠️ **HTTP 路由本身没有鉴权**。`/xiaoyi/state`、`/xiaoyi/public/*` 谁都能访问。请**不要**把 DSH 的端口裸奔到公网；要走隧道的话，用带鉴权/随机域名的方案。
+`local` mode requires `state.publicBaseUrl`; without it the tool returns an error and **never** silently falls back to an image host.
 
 ---
 
-## 已知限制
+## Security and privacy
 
-- **出站附件必须走公网 URL**：这是协议限制，不是实现偷懒。
-- **入站附件链接是预签名的、大约 30 分钟过期**：所以必须"一到就抓"。本插件就是这么做的；如果下载失败，基本就是链接已经过期。
-- **`media/` 目录不会自动清理**：长期使用请自己定期清理 `~/.dsh/xiaoyi/media/`。
-- **平台侧策略可能变**：OpenClaw 模式、地址、字段都可能随华为侧调整而失效，本插件不保证长期可用。
+- **Credentials stay local.** They live in `~/.dsh/xiaoyi/state.json`, which is excluded by `.gitignore`. They are never committed and never logged (the log only records whether a value is present).
+- **Inbound attachments are protected against SSRF.** The inbound `uri` comes from an external message and is treated as untrusted input. Only `http`/`https` is allowed; loopback, private and link-local addresses are rejected (including cloud metadata endpoints such as `169.254.169.254`), and **redirect targets are checked again**.
+- **Attachments are size-capped.** 50 MB per file, read as a stream, so a lying `content-length` cannot exhaust memory.
+- **Published URLs are unguessable.** Filenames include 8 random bytes.
+- ⚠️ **The HTTP routes themselves have no authentication.** `/xiaoyi/state` and `/xiaoyi/public/*` are reachable by anyone who can reach the port. Do **not** expose the DSH port directly to the internet; if you use a tunnel, prefer one with authentication or an unguessable hostname.
 
 ---
 
-## 卸载
+## Known limitations
 
-1. 从 `~/.dsh/profiles/web/package.json` 的 `bundles` 与 `dependencies` 里删掉 `dsh-xiaoyi`
+- **Outbound attachments must use a public URL.** This is a protocol constraint, not a shortcut in the implementation.
+- **Inbound attachment URLs are pre-signed and expire in roughly 30 minutes**, so they must be fetched immediately. This plugin does exactly that; if a download fails, the link has most likely expired.
+- **The `media/` directory is never cleaned automatically.** Prune `~/.dsh/xiaoyi/media/` yourself periodically.
+- **Platform-side policies may change.** OpenClaw mode, endpoints and field names can be adjusted by Huawei at any time; long-term availability is not guaranteed.
+
+---
+
+## Uninstall
+
+1. Remove `dsh-xiaoyi` from `bundles` and `dependencies` in `~/.dsh/profiles/web/package.json`.
 2. `dsh plugin --profile web install`
-3. 冷启动宿主
-4. 想彻底清净的话，删掉 `~/.dsh/xiaoyi/`（里面有凭证和日志）
+3. Cold-start the host.
+4. For a complete cleanup, delete `~/.dsh/xiaoyi/` (it contains credentials and logs).
 
 ---
 
-## 排错
+## Troubleshooting
 
-| 现象 | 排查方向 |
+| Symptom | What to check |
 | --- | --- |
-| 装完没反应 | **冷启动**了吗？宿主端插件热重载不生效 |
-| `status` 里 `ready:false` | AK / SK / agentId 有缺项 |
-| 一直连不上、`lastError` 有握手错误 | `wsUrl` 是否被改错；网络是否能到 `hag.cloud.huawei.com:443` |
-| 连上又断、反复重连 | 看日志里的"连接假死"；超过 90 秒没有任何回音（含 pong）会主动重连 |
-| 小艺发消息没回应 | 看 `~/.dsh/xiaoyi/xiaoyi.log`；确认宿主日志里插件是否加载成功 |
-| 收到「DSH 会话未就绪」 | 宿主启动后第一次请求要现建会话，稍等再发一次 |
-| 发的图片收不到 | 协议要求公网 https。检查 `publicBaseUrl` 有没有配、隧道还活着吗 |
+| Nothing happens after installing | Did you **cold-start**? Host-side plugins are not applied by hot reload. |
+| `status` reports `ready:false` | One of AK / SK / agentId is missing. |
+| Cannot connect, `lastError` mentions a handshake failure | Is `wsUrl` correct? Can the machine reach `hag.cloud.huawei.com:443`? |
+| Connects then keeps reconnecting | Look for "stale connection" in the log; if nothing (including pong) arrives for over 90 seconds the plugin reconnects on purpose. |
+| XiaoYi messages get no reply | Check `~/.dsh/xiaoyi/xiaoyi.log` and confirm in the host log that the plugin loaded. |
+| Reply says the DSH session is not ready | The very first request after a host start has to create the session; send the message again shortly after. |
+| Sent images do not arrive | The protocol requires a public https URL. Check `publicBaseUrl` and whether your tunnel is still alive. |
 
 ---
 
-## 许可
+## License
 
 [MIT](./LICENSE)
 
-## 免责声明
+## Disclaimer
 
-**使用前请务必读 [`DISCLAIMER.md`](./DISCLAIMER.md)。**
+**Please read [`DISCLAIMER.md`](./DISCLAIMER.md) before use.**
