@@ -24,6 +24,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { randomBytes, createHmac, createHash } from 'node:crypto'
+import { lookup as dnsLookup } from 'node:dns/promises'
 import tls from 'node:tls'
 import net from 'node:net'
 
@@ -31,6 +32,10 @@ export const name = 'dsh-xiaoyi'
 export const inject = ['tools', 'webServer']
 
 const DEFAULT_WS_URL = 'wss://hag.cloud.huawei.com/openclaw/v1/ws/link'
+// Upper bound on one WebSocket frame and on a reassembled fragmented message. The peer is TLS-verified,
+// so this only defends against a hostile or broken server — but without it a single bogus length header
+// makes the receive buffer grow without bound and OOMs the whole host process.
+const MAX_WS_FRAME = 8 * 1024 * 1024
 const STATE_DIR = join(homedir(), '.dsh', 'xiaoyi')
 const STATE_FILE = join(STATE_DIR, 'state.json')
 const LOG_FILE = join(STATE_DIR, 'xiaoyi.log')
@@ -198,6 +203,12 @@ class MiniWS {
 
   _onData(chunk) {
     this.buf = Buffer.concat([this.buf, chunk])
+    // Hard ceiling on what we are willing to buffer while waiting for a frame to complete. A frame header
+    // can claim 2^63 bytes; without this the buffer just keeps growing until the process dies.
+    if (this.handshaken && this.buf.length > MAX_WS_FRAME * 2) {
+      this._fail(new Error('receive buffer exceeded ' + (MAX_WS_FRAME * 2) + ' bytes'))
+      return
+    }
     if (!this.handshaken) {
       const idx = this.buf.indexOf('\r\n\r\n')
       if (idx < 0) {
@@ -250,6 +261,9 @@ class MiniWS {
         mask = this.buf.slice(off, off + 4); off += 4
       }
       if (this.buf.length < off + len) return
+      // A frame may declare up to 2^63 bytes. Waiting for a payload that will never arrive means the
+      // receive buffer grows forever and takes the whole DSH host down with it — so refuse it up front.
+      if (len > MAX_WS_FRAME) { this._fail(new Error('frame too large: ' + len + ' bytes')); return }
       let payload = this.buf.slice(off, off + len)
       this.buf = this.buf.slice(off + len)
       if (mask) {
@@ -262,6 +276,13 @@ class MiniWS {
       if (opcode === 0xa) { if (this.onpong) { try { this.onpong() } catch (e) { /* ignore */ } } ; continue }
       if (opcode === 0x0) {
         this.fragChunks.push(payload)
+        // Same ceiling for a fragmented message: `fragChunks` would otherwise accumulate without limit.
+        if (this.fragChunks.reduce((n, c) => n + c.length, 0) > MAX_WS_FRAME) {
+          this.fragChunks = []
+          this.fragOpcode = 0
+          this._fail(new Error('fragmented message exceeded ' + MAX_WS_FRAME + ' bytes'))
+          return
+        }
         if (fin) {
           const full = Buffer.concat(this.fragChunks)
           this.fragChunks = []
@@ -551,6 +572,46 @@ const MIME_EXT = {
 //      to probe the intranet, or even to read a cloud environment's metadata service (169.254.169.254)
 //   3) After a redirect, check again: a public address 302-ing to 127.0.0.1 is the most common bypass trick
 
+// Expand an IPv6 literal into its 16 bytes, or null when it is not a valid address.
+//
+// Why by hand: WHATWG `new URL()` canonicalises equivalent spellings to the same text, and that text is
+// *not* what string prefixes expect. `http://[::ffff:127.0.0.1]/` becomes hostname `[::ffff:7f00:1]`, so a
+// `startsWith('::ffff:')` check followed by `slice(7)` yields `7f00:1` — not an IP, so the guard passed.
+// Comparing the 16 parsed bytes instead makes every spelling of the same address behave identically.
+function ipv6ToBytes(addr) {
+  let s = String(addr || '').trim().toLowerCase()
+  const pct = s.indexOf('%')                 // drop a zone id (`fe80::1%eth0`)
+  if (pct >= 0) s = s.slice(0, pct)
+  if (!s.includes(':')) return null
+  // A trailing dotted quad is just two more groups: `::ffff:127.0.0.1` === `::ffff:7f00:1`
+  const lastColon = s.lastIndexOf(':')
+  const tail = s.slice(lastColon + 1)
+  if (tail.includes('.')) {
+    if (!net.isIPv4(tail)) return null
+    const p = tail.split('.').map(Number)
+    s = s.slice(0, lastColon + 1) + (((p[0] << 8) | p[1]).toString(16)) + ':' + (((p[2] << 8) | p[3]).toString(16))
+  }
+  const dbl = s.indexOf('::')
+  if (dbl >= 0 && dbl !== s.lastIndexOf('::')) return null   // at most one `::` is legal
+  let groups
+  if (dbl >= 0) {
+    const ha = s.slice(0, dbl) ? s.slice(0, dbl).split(':') : []
+    const hb = s.slice(dbl + 2) ? s.slice(dbl + 2).split(':') : []
+    const fill = 8 - ha.length - hb.length
+    if (fill < 1) return null                                // `::` must stand for at least one group
+    groups = ha.concat(new Array(fill).fill('0'), hb)
+  } else {
+    groups = s.split(':')
+  }
+  if (groups.length !== 8) return null
+  const out = Buffer.alloc(16)
+  for (let i = 0; i < 8; i++) {
+    if (!/^[0-9a-f]{1,4}$/.test(groups[i])) return null
+    out.writeUInt16BE(parseInt(groups[i], 16), i * 2)
+  }
+  return out
+}
+
 function isPrivateIp(ip) {
   const v = String(ip || '')
   if (net.isIPv4(v)) {
@@ -563,24 +624,63 @@ function isPrivateIp(ip) {
     if (p[0] >= 224) return true                                  // multicast / reserved ranges
     return false
   }
-  if (net.isIPv6(v)) {
-    const s = v.toLowerCase()
-    if (s === '::' || s === '::1') return true
-    if (s.startsWith('fe80') || s.startsWith('fc') || s.startsWith('fd')) return true
-    if (s.startsWith('::ffff:')) return isPrivateIp(s.slice(7))   // IPv4-mapped
-    return false
-  }
+  const b = ipv6ToBytes(v)
+  if (!b) return false
+  const zero = (from, to) => { for (let i = from; i < to; i++) if (b[i] !== 0) return false; return true }
+  if (zero(0, 16)) return true                                    // ::
+  if (zero(0, 15) && b[15] === 1) return true                     // ::1
+  if (b[0] === 0xff) return true                                  // ff00::/8 multicast
+  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return true        // fe80::/10 link-local (fe80-febf)
+  if (b[0] === 0xfe && (b[1] & 0xc0) === 0xc0) return true        // fec0::/10 site-local (deprecated)
+  if ((b[0] & 0xfe) === 0xfc) return true                         // fc00::/7 unique-local
+  const v4 = b[12] + '.' + b[13] + '.' + b[14] + '.' + b[15]
+  if (zero(0, 10) && b[10] === 0xff && b[11] === 0xff) return isPrivateIp(v4)   // ::ffff:a.b.c.d
+  if (zero(0, 12) && (b[12] | b[13] | b[14] | b[15])) return isPrivateIp(v4)   // ::a.b.c.d (deprecated)
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && zero(4, 12)) return isPrivateIp(v4) // NAT64 64:ff9b::/96
+  if (b[0] === 0x20 && b[1] === 0x02) return true                 // 2002::/16 6to4 — can tunnel anywhere
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && b[3] === 0x00) return true // 2001:0::/32 Teredo
   return false
 }
+
+const LOCAL_NAME_RE = /^(localhost|.+\.localhost|.+\.local|.+\.internal|.+\.lan|.+\.home\.arpa|.+\.localdomain|.+\.test|.+\.invalid|.+\.example|.+\.onion)\.?$/i
 
 function checkInboundUri(uri) {
   let u
   try { u = new URL(String(uri)) } catch (e) { return '不是合法的 URL' }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return '只允许 http/https 链接（收到 ' + u.protocol + '）'
-  const host = u.hostname.replace(/^\[|\]$/g, '')
-  if (/^(localhost|.+\.local|.+\.internal|.+\.localhost)$/i.test(host)) return '拒绝访问本机/内网地址：' + host
+  // Strip the IPv6 brackets AND a trailing dot: `localhost.` is the same host as `localhost` but would
+  // slip past an anchored regex, and it is not an IP either.
+  const host = u.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '')
+  if (!host) return '没有主机名'
+  if (LOCAL_NAME_RE.test(host)) return '拒绝访问本机/内网地址：' + host
   if (net.isIP(host) && isPrivateIp(host)) return '拒绝访问内网地址：' + host
   return ''
+}
+
+// A hostname is only judged by what it actually resolves to: `127.0.0.1.nip.io` and friends are ordinary
+// public DNS names that point at loopback, so the literal-IP test above cannot see them.
+async function resolvesToPrivate(host) {
+  if (net.isIP(host)) return ''
+  let addrs
+  try {
+    addrs = await dnsLookup(host, { all: true })
+  } catch (e) {
+    return '域名解析失败：' + host
+  }
+  if (!addrs || !addrs.length) return '域名解析不到地址：' + host
+  for (const a of addrs) {
+    if (isPrivateIp(a.address)) return '域名 ' + host + ' 解析到内网地址 ' + a.address
+  }
+  return ''
+}
+
+// Full gate: structural checks on the URL, then what it resolves to. Used for every hop of a redirect chain.
+async function checkInboundTarget(uri) {
+  const structural = checkInboundUri(uri)
+  if (structural) return structural
+  let host
+  try { host = new URL(String(uri)).hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '') } catch (e) { return '不是合法的 URL' }
+  return resolvesToPrivate(host)
 }
 
 // Stream the body under a hard cap: trusting content-length alone lets an under-reporting response blow up memory
@@ -604,6 +704,8 @@ async function readBodyCapped(res, max) {
   return Buffer.concat(chunks)
 }
 
+const MAX_REDIRECT_HOPS = 5
+
 async function downloadInboundFiles(fileParts) {
   const dir = join(homedir(), '.dsh', 'xiaoyi', 'media')
   const out = []
@@ -614,7 +716,7 @@ async function downloadInboundFiles(fileParts) {
     const rawName = String(f.name || f.fileName || '')
     const mime = String(f.mimeType || '')
     if (!uri) { out.push({ ok: false, name: rawName, mimeType: mime, error: '没有 uri' }); continue }
-    const risky = checkInboundUri(uri)
+    const risky = await checkInboundTarget(uri)
     if (risky) {
       out.push({ ok: false, name: rawName, mimeType: mime, uri, error: risky })
       log('拒绝下载附件：' + risky + ' uri=' + uri.slice(0, 120))
@@ -628,16 +730,34 @@ async function downloadInboundFiles(fileParts) {
       const timer = setTimeout(() => ctl.abort(), 60000)
       let res
       try {
-        res = await fetch(uri, { signal: ctl.signal, headers: { 'User-Agent': 'dsh-xiaoyi/0.1' } })
+        // Follow redirects by hand. With the default `redirect:'follow'` every hop is requested *before* we
+        // can look at where we landed, so a public URL that 302s to 127.0.0.1 still reaches loopback first.
+        // Here each hop is re-checked (structure + resolved address) before it is fetched.
+        let cur = uri
+        for (let hop = 0; ; hop++) {
+          const hopBad = await checkInboundTarget(cur)
+          if (hopBad) throw new Error('重定向到不可信地址：' + hopBad)
+          res = await fetch(cur, { signal: ctl.signal, redirect: 'manual', headers: { 'User-Agent': 'dsh-xiaoyi/0.1' } })
+          const code = res.status
+          if (code !== 301 && code !== 302 && code !== 303 && code !== 307 && code !== 308) break
+          if (hop >= MAX_REDIRECT_HOPS) throw new Error('重定向次数过多（上限 ' + MAX_REDIRECT_HOPS + '）')
+          const loc = res.headers.get('location')
+          if (!loc) throw new Error('重定向缺少 Location 头')
+          let next
+          try { next = new URL(loc, cur).href } catch (e) { throw new Error('重定向地址非法：' + String(loc).slice(0, 120)) }
+          try { if (res.body && res.body.cancel) await res.body.cancel() } catch (e) { /* ignore */ }
+          cur = next
+        }
       } finally { clearTimeout(timer) }
-      if (!res.ok) throw new Error('HTTP ' + res.status)
-      // re-check where we landed after redirects: a public link 302-ing to 127.0.0.1 is a classic bypass
-      const landed = checkInboundUri(res.url || uri)
-      if (landed) throw new Error('重定向到不可信地址：' + landed)
+      if (!res.ok) {
+        try { if (res.body && res.body.cancel) await res.body.cancel() } catch (e) { /* ignore */ }
+        throw new Error('HTTP ' + res.status)
+      }
       // size gate: don't let one huge attachment fill up the disk (50 MB cap by default)
       const MAX_INBOUND = 50 * 1024 * 1024
       const declared = Number(res.headers.get('content-length') || 0)
       if (declared && declared > MAX_INBOUND) {
+        try { if (res.body && res.body.cancel) await res.body.cancel() } catch (e) { /* ignore */ }
         throw new Error('文件太大：' + (declared / 1048576).toFixed(1) + ' MB（上限 50 MB）')
       }
       const buf = await readBodyCapped(res, MAX_INBOUND)
@@ -750,6 +870,7 @@ export function apply(ctx) {
   let listenPromise = null    // session initialisation currently in flight (shared by concurrent callers, avoids a false "not ready")
   let pending = []            // queue of XiaoYi requests awaiting a reply (FIFO): the reply always targets the head
   let currentReply = ''       // most recent chunk of body text in this turn
+  let inflight = 0            // turns we injected into the session that have not been answered yet
 
   const channel = new XiaoYiChannel({
     ak: state.ak,
@@ -797,8 +918,10 @@ export function apply(ctx) {
             content: [{ type: 'text', text }],
             source: { kind: 'plugin:dsh-xiaoyi' },
           })
+          inflight++
           Promise.resolve(followed).catch((e) => {
             log('投递会话失败', e && e.message)
+            if (inflight > 0) inflight--
             channel.sendArtifact(req.sessionId, req.taskId, req.messageId, '把消息投递给 DSH 会话时出错了：' + String((e && e.message) || e), true)
             pending = pending.filter((p) => p !== req)
           })
@@ -813,8 +936,13 @@ export function apply(ctx) {
       // the device side hit "stop": drop this task from the reply queue so we don't later reply to a cancelled task
       const before = pending.length
       pending = pending.filter((p) => !(p.taskId === info.taskId || p.messageId === info.taskId || p.taskId === info.id))
-      if (pending.length !== before) log('已从待回复队列移除被取消的任务（剩 ' + pending.length + ' 条）')
-      currentReply = ''
+      if (pending.length !== before) {
+        log('已从待回复队列移除被取消的任务（剩 ' + pending.length + ' 条）')
+        // Only clear the in-progress body when we actually removed something. A stale or duplicate cancel
+        // that matches nothing would otherwise wipe the body of the turn still running, so the idle fallback
+        // finds nothing to send, the head is never popped, and every later reply is off by one.
+        currentReply = ''
+      }
     },
   })
 
@@ -877,7 +1005,7 @@ export function apply(ctx) {
         if (typeof agents.get === 'function') {
           try {
             const live = agents.get(id)
-            if (live && live.agent) { log('会话 ' + id + ' 已在本进程里活着，直接复用'); return live }
+            if (live) { log('会话 ' + id + ' 已在本进程里活着，直接复用'); return { agent: live, dispose: async () => {} } }
           } catch (e) { /* ignore */ }
         }
         const o = { resumeSessionId: id }
@@ -950,6 +1078,7 @@ export function apply(ctx) {
     const text = currentReply
     if (!req) { currentReply = ''; return }
     currentReply = ''
+    if (inflight > 0) inflight--
     pending.shift()
     const out = String(text || '').trim()
     if (!out) { log('本回合没有可见正文（' + reason + '），不回帧'); return }
@@ -975,7 +1104,19 @@ export function apply(ctx) {
     try {
       if (!payload || payload.status !== 'idle') return
       if (!listenHandle || payload.agent !== listenHandle.agent) return
-      if (pending.length && currentReply) finishTurn('idle')
+      if (!pending.length) return
+      if (currentReply) { finishTurn('idle'); return }
+      // The turn ended with no visible body text — the model call failed, the turn was stopped, or the
+      // assistant message carried only reasoning, which extractReplyText deliberately skips. Without this
+      // the head would sit at pending[0] for the life of the process and every later reply would be sent
+      // under the *stuck* task's ids while the newer task never receives its final frame.
+      // Guarded by `inflight` so an idle tick that does not belong to one of our turns changes nothing.
+      if (inflight <= 0) return
+      inflight--
+      const req = pending.shift()
+      channel.sendStatus(req.sessionId, req.taskId, req.messageId, '任务处理已完成~', 'completed', false)
+      channel.sendArtifact(req.sessionId, req.taskId, req.messageId, '这一轮没有产生可以回复的正文（可能被中断，或者模型这一轮出错了）。', true)
+      log('本回合无可见正文，已回帧并出队（队列剩 ' + pending.length + ' 条）')
     } catch (e) { /* ignore */ }
   })
 

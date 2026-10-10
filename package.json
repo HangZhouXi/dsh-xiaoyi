@@ -1,6 +1,6 @@
 {
   "name": "dsh-xiaoyi",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A DSH (DeepSeek Harness) host plugin that connects Huawei XiaoYi in OpenClaw mode to your local DSH session. Zero third-party dependencies, with a hand-written minimal RFC6455 WebSocket client.",
   "type": "module",
   "main": "index.js",
